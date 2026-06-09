@@ -1,11 +1,19 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react'
-import Waveform from './components/Waveform'
+import EvaOrb3D from './components/EvaOrb3D'
+import ClockWidget from './components/ClockWidget'
+import WeatherWidget from './components/WeatherWidget'
+import MarketWidget from './components/MarketWidget'
+import NowPlaying from './components/NowPlaying'
 import ConversationLog from './components/ConversationLog'
+import StatusBar from './components/StatusBar'
 import {
   classifyIntent, getMaxTokens,
   handleTime, handleWeather, handleNews, handleCalendar, handleMath, handleGreeting, handleStocks,
 } from './intent.js'
 import { getCached, setCached } from './cache.js'
+import { initiateLogin, handleCallback, isAuthenticated } from './spotify/auth.js'
+import { initPlayer, getDeviceId, togglePlay, nextTrack, previousTrack } from './spotify/player.js'
+import { handleMusicCommand } from './spotify/commands.js'
 
 const SYSTEM_PROMPT =
   'You are EVA, a personal AI assistant for Ethan Yang, a Stanford freshman and entrepreneur based in Honolulu, Hawaii. Be concise, smart, and direct — keep spoken answers short. Ethan is juggling a Hawaii state senate internship, a startup accelerator, and content creation. You have tools available — use them proactively when they would help answer the question accurately.'
@@ -15,49 +23,48 @@ const API_URL = '/api/anthropic/v1/messages'
 const ELEVENLABS_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL'
 const HISTORY_LIMIT = 6
 const TOKENS_PER_CALL = 500
-const COST_PER_1K = 0.003
 
 const TOOLS = [
   {
     name: 'get_time',
-    description: 'Get the current date and time. Always includes Hawaii time since that is where Ethan is based.',
+    description: 'Get the current date and time in Hawaii.',
     input_schema: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'get_weather',
-    description: 'Get the current weather conditions for a city or location.',
+    description: 'Get current weather for a city.',
     input_schema: {
       type: 'object',
       properties: {
-        location: { type: 'string', description: 'City or location name, e.g. "Honolulu" or "Palo Alto, CA"' },
+        location: { type: 'string', description: 'City or location name' },
       },
       required: ['location'],
     },
   },
   {
     name: 'save_note',
-    description: "Save a note or reminder for Ethan to refer to later.",
+    description: "Save a note or reminder.",
     input_schema: {
       type: 'object',
       properties: {
-        title: { type: 'string', description: 'Short title or label for the note' },
-        content: { type: 'string', description: 'Full content of the note' },
+        title: { type: 'string' },
+        content: { type: 'string' },
       },
       required: ['title', 'content'],
     },
   },
   {
     name: 'get_notes',
-    description: "Retrieve all of Ethan's saved notes.",
+    description: "Retrieve all saved notes.",
     input_schema: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'delete_note',
-    description: 'Delete a saved note by its index number.',
+    description: 'Delete a note by index.',
     input_schema: {
       type: 'object',
       properties: {
-        index: { type: 'number', description: 'Zero-based index of the note to delete' },
+        index: { type: 'number' },
       },
       required: ['index'],
     },
@@ -79,20 +86,19 @@ async function executeTool(name, input) {
         const data = await res.json()
         const c = data.current_condition[0]
         const area = data.nearest_area?.[0]?.areaName?.[0]?.value || input.location
-        const country = data.nearest_area?.[0]?.country?.[0]?.value || ''
-        return `${area}${country ? ', ' + country : ''}: ${c.weatherDesc[0].value}, ${c.temp_F}°F (feels like ${c.FeelsLikeF}°F), humidity ${c.humidity}%, wind ${c.windspeedMiles} mph`
+        return `${area}: ${c.weatherDesc[0].value}, ${c.temp_F}°F (feels like ${c.FeelsLikeF}°F), humidity ${c.humidity}%, wind ${c.windspeedMiles} mph`
       } catch (e) { return `Weather lookup failed: ${e.message}` }
     }
     case 'save_note': {
       const notes = JSON.parse(localStorage.getItem('eva_notes') || '[]')
       notes.push({ title: input.title, content: input.content, created: new Date().toISOString() })
       localStorage.setItem('eva_notes', JSON.stringify(notes))
-      return `Note saved (index ${notes.length - 1}): "${input.title}"`
+      return `Note saved: "${input.title}"`
     }
     case 'get_notes': {
       const notes = JSON.parse(localStorage.getItem('eva_notes') || '[]')
       if (notes.length === 0) return 'No notes saved.'
-      return notes.map((n, i) => `[${i}] ${n.title}: ${n.content} (saved ${new Date(n.created).toLocaleDateString()})`).join('\n')
+      return notes.map((n, i) => `[${i}] ${n.title}: ${n.content}`).join('\n')
     }
     case 'delete_note': {
       const notes = JSON.parse(localStorage.getItem('eva_notes') || '[]')
@@ -100,22 +106,15 @@ async function executeTool(name, input) {
       if (idx < 0 || idx >= notes.length) return `No note at index ${idx}`
       const [removed] = notes.splice(idx, 1)
       localStorage.setItem('eva_notes', JSON.stringify(notes))
-      return `Deleted note: "${removed.title}"`
+      return `Deleted: "${removed.title}"`
     }
     default: return `Unknown tool: ${name}`
   }
 }
 
-const STATUS_HINTS = {
-  idle: 'PRESS TO SPEAK',
-  listening: 'LISTENING...',
-  loading: 'PROCESSING...',
-  speaking: 'SPEAKING...',
-}
-
 export default function App() {
   const [status, setStatus] = useState('idle')
-  const [wakeMode, setWakeMode] = useState('off') // 'off' | 'passive' | 'awake'
+  const [wakeMode, setWakeMode] = useState('off')
   const [conversation, setConversation] = useState([])
   const [interimText, setInterimText] = useState('')
   const [activeTools, setActiveTools] = useState([])
@@ -123,16 +122,17 @@ export default function App() {
   const [speechError, setSpeechError] = useState('')
   const [apiCallCount, setApiCallCount] = useState(0)
   const [cacheHits, setCacheHits] = useState(0)
+  const [spotifyAuth, setSpotifyAuth] = useState(isAuthenticated())
+  const [playerState, setPlayerState] = useState(null)
+  const [volume, setVolume] = useState(50)
 
   const statusRef = useRef('idle')
   const wakeModeRef = useRef('off')
   const conversationRef = useRef([])
   const apiHistoryRef = useRef([])
-  const recognitionRef = useRef(null)   // active listening
-  const passiveRef = useRef(null)       // passive/wake-word listening
+  const recognitionRef = useRef(null)
+  const passiveRef = useRef(null)
   const audioRef = useRef(null)
-
-  // Stable refs to latest function versions — breaks circular dependency
   const startListeningRef = useRef(null)
   const startPassiveRef = useRef(null)
 
@@ -158,11 +158,9 @@ export default function App() {
     window.speechSynthesis.cancel()
   }, [])
 
-  // speak(text, { newsRate: false })
   const speak = useCallback(async (text, { newsRate = false } = {}) => {
     stopAudio()
     const elevenKey = import.meta.env.VITE_ELEVENLABS_API_KEY
-
     if (elevenKey) {
       try {
         updateStatus('speaking')
@@ -183,19 +181,8 @@ export default function App() {
         const url = URL.createObjectURL(blob)
         const audio = new Audio(url)
         audioRef.current = audio
-        audio.onended = () => {
-          URL.revokeObjectURL(url)
-          audioRef.current = null
-          updateStatus('idle')
-          // Return to passive listening after response
-          startPassiveRef.current?.()
-        }
-        audio.onerror = () => {
-          URL.revokeObjectURL(url)
-          audioRef.current = null
-          updateStatus('idle')
-          startPassiveRef.current?.()
-        }
+        audio.onended = () => { URL.revokeObjectURL(url); audioRef.current = null; updateStatus('idle'); startPassiveRef.current?.() }
+        audio.onerror = () => { URL.revokeObjectURL(url); audioRef.current = null; updateStatus('idle'); startPassiveRef.current?.() }
         await audio.play()
         return
       } catch (err) {
@@ -204,19 +191,14 @@ export default function App() {
         startPassiveRef.current?.()
       }
     }
-
     // Browser TTS fallback
     const synth = window.speechSynthesis
     const utter = new SpeechSynthesisUtterance(text)
     utter.rate = newsRate ? 1.4 : 1.3
     utter.pitch = 0.88
-    utter.volume = 1
     const applyVoice = () => {
       const voices = synth.getVoices()
-      const pick =
-        voices.find((v) => v.name.includes('Daniel') && v.lang.startsWith('en')) ||
-        voices.find((v) => v.name.includes('Google') && v.lang === 'en-US') ||
-        voices.find((v) => v.lang === 'en-US')
+      const pick = voices.find(v => v.name.includes('Google') && v.lang === 'en-US') || voices.find(v => v.lang === 'en-US')
       if (pick) utter.voice = pick
     }
     if (synth.getVoices().length > 0) applyVoice()
@@ -231,22 +213,22 @@ export default function App() {
     updateStatus('loading')
     setInterimText('')
     setActiveTools([])
-    updateWakeMode('off') // clear awake indicator while processing
+    updateWakeMode('off')
 
-    // ── 1. Intent detection ────────────────────────────────────────────
+    // 1. Intent detection
     const intent = classifyIntent(userText)
     if (intent) {
       let response
       try {
-        if (intent === 'time') response = await handleTime()
-        else if (intent === 'weather') response = await handleWeather(userText)
-        else if (intent === 'news') response = await handleNews()
+        if (intent === 'time')     response = await handleTime()
+        else if (intent === 'weather')  response = await handleWeather(userText)
+        else if (intent === 'news')     response = await handleNews()
         else if (intent === 'calendar') response = handleCalendar()
-        else if (intent === 'math') response = handleMath(userText) || null
-        else if (intent === 'stocks') response = await handleStocks(userText)
+        else if (intent === 'math')     response = handleMath(userText) || null
+        else if (intent === 'stocks')   response = await handleStocks(userText)
         else if (intent === 'greeting') response = handleGreeting()
+        else if (intent === 'music')    response = await handleMusicCommand(userText, volume, setVolume)
       } catch {}
-
       if (response) {
         addDisplayMessage({ role: 'user', content: userText })
         addDisplayMessage({ role: 'assistant', content: response, isIntent: true })
@@ -255,23 +237,23 @@ export default function App() {
       }
     }
 
-    // ── 2. Response cache ──────────────────────────────────────────────
+    // 2. Response cache
     const cached = getCached(userText)
     if (cached) {
-      setCacheHits((n) => n + 1)
+      setCacheHits(n => n + 1)
       addDisplayMessage({ role: 'user', content: userText })
       addDisplayMessage({ role: 'assistant', content: cached, isCached: true })
-      speak(cached) // passive restarts inside speak's onended/onerror
+      speak(cached)
       return
     }
 
-    // ── 3. Claude API call ─────────────────────────────────────────────
+    // 3. Claude API
     addMessage({ role: 'user', content: userText })
     try {
       let history = apiHistoryRef.current.slice(-HISTORY_LIMIT)
       while (history.length && history[0].role !== 'user') history = history.slice(1)
       const maxTokens = getMaxTokens(userText)
-      let apiMsgs = history.map((m) => ({ role: m.role, content: m.content }))
+      let apiMsgs = history.map(m => ({ role: m.role, content: m.content }))
       let finalText = null
 
       while (true) {
@@ -291,11 +273,11 @@ export default function App() {
         }
         const data = await res.json()
         if (data.stop_reason === 'tool_use') {
-          const toolUseBlocks = data.content.filter((b) => b.type === 'tool_use')
-          setActiveTools(toolUseBlocks.map((b) => b.name))
+          const toolUseBlocks = data.content.filter(b => b.type === 'tool_use')
+          setActiveTools(toolUseBlocks.map(b => b.name))
           apiMsgs = [...apiMsgs, { role: 'assistant', content: data.content }]
           const toolResults = await Promise.all(
-            toolUseBlocks.map(async (block) => ({
+            toolUseBlocks.map(async block => ({
               type: 'tool_result',
               tool_use_id: block.id,
               content: await executeTool(block.name, block.input),
@@ -310,11 +292,11 @@ export default function App() {
           setActiveTools([])
           continue
         }
-        finalText = data.content.find((b) => b.type === 'text')?.text ?? '[No response]'
+        finalText = data.content.find(b => b.type === 'text')?.text ?? '[No response]'
         break
       }
 
-      setApiCallCount((n) => n + 1)
+      setApiCallCount(n => n + 1)
       setCached(userText, finalText)
       addMessage({ role: 'assistant', content: finalText })
       speak(finalText)
@@ -325,13 +307,11 @@ export default function App() {
       updateStatus('idle')
       startPassiveRef.current?.()
     }
-  }, [addMessage, addDisplayMessage, speak, updateStatus, updateWakeMode])
+  }, [addMessage, addDisplayMessage, speak, updateStatus, updateWakeMode, volume])
 
   const startListening = useCallback(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SR) { alert('Speech recognition not supported. Use Chrome or Edge.'); return }
-
-    // Stop passive if running
     if (passiveRef.current) { passiveRef.current.abort(); passiveRef.current = null }
     if (recognitionRef.current) recognitionRef.current.abort()
 
@@ -339,7 +319,6 @@ export default function App() {
     rec.continuous = false
     rec.interimResults = true
     rec.lang = 'en-US'
-    rec.maxAlternatives = 1
     rec.onstart = () => updateStatus('listening')
     rec.onresult = (e) => {
       let interim = '', final = ''
@@ -353,7 +332,6 @@ export default function App() {
     }
     rec.onerror = (e) => {
       if (e.error !== 'aborted') {
-        console.error('Speech error:', e.error)
         updateStatus('idle')
         setInterimText('')
         setSpeechError(e.error)
@@ -376,7 +354,6 @@ export default function App() {
     if (recognitionRef.current) { recognitionRef.current.stop(); recognitionRef.current = null }
     updateStatus('idle')
     setInterimText('')
-    // Return to passive after manually stopping
     setTimeout(() => startPassiveRef.current?.(), 300)
   }, [updateStatus])
 
@@ -388,7 +365,6 @@ export default function App() {
   const startPassiveListening = useCallback(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SR) return
-    // Don't start passive if actively doing something
     if (['listening', 'loading', 'speaking'].includes(statusRef.current)) return
     if (passiveRef.current) { passiveRef.current.abort(); passiveRef.current = null }
 
@@ -396,12 +372,10 @@ export default function App() {
     rec.continuous = true
     rec.interimResults = true
     rec.lang = 'en-US'
-    rec.maxAlternatives = 1
 
     rec.onresult = (e) => {
       for (let i = e.resultIndex; i < e.results.length; i++) {
-        const transcript = e.results[i][0].transcript.toLowerCase()
-        if (/hey[\s,]*eva/.test(transcript)) {
+        if (/hey[\s,]*eva/.test(e.results[i][0].transcript.toLowerCase())) {
           rec.abort()
           passiveRef.current = null
           updateWakeMode('awake')
@@ -412,20 +386,15 @@ export default function App() {
     }
 
     rec.onend = () => {
-      // Auto-restart passive unless we've moved to active listening/loading/speaking
       if (passiveRef.current === rec && wakeModeRef.current === 'passive') {
-        setTimeout(() => {
-          if (wakeModeRef.current === 'passive') startPassiveRef.current?.()
-        }, 300)
+        setTimeout(() => { if (wakeModeRef.current === 'passive') startPassiveRef.current?.() }, 300)
       }
     }
 
     rec.onerror = (e) => {
       if (e.error !== 'aborted' && passiveRef.current === rec) {
         passiveRef.current = null
-        setTimeout(() => {
-          if (wakeModeRef.current === 'passive') startPassiveRef.current?.()
-        }, 2000)
+        setTimeout(() => { if (wakeModeRef.current === 'passive') startPassiveRef.current?.() }, 2000)
       }
     }
 
@@ -433,41 +402,62 @@ export default function App() {
     updateWakeMode('passive')
     try {
       rec.start()
-    } catch (err) {
-      // start() threw synchronously (e.g. NotAllowedError before permission granted)
+    } catch {
       passiveRef.current = null
       updateWakeMode('off')
     }
   }, [updateWakeMode])
 
-  // Keep latest function refs up to date every render
   startListeningRef.current = startListening
   startPassiveRef.current = startPassiveListening
 
-  // Auto-start passive listening on mount — only if mic already permitted
+  const initSpotify = useCallback(async () => {
+    try {
+      await initPlayer(setPlayerState)
+      setSpotifyAuth(true)
+    } catch (err) {
+      console.error('[EVA Spotify]', err)
+    }
+  }, [])
+
+  const handleNowPlayingControl = useCallback(async (action) => {
+    if (action === 'toggle') await togglePlay()
+    else if (action === 'next') await nextTrack()
+    else if (action === 'previous') await previousTrack()
+  }, [])
+
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const code = params.get('code')
+    const state = params.get('state')
+    if (code && state) {
+      handleCallback(code, state).then(success => {
+        window.history.replaceState({}, '', '/')
+        if (success) initSpotify()
+      })
+    } else if (isAuthenticated()) {
+      initSpotify()
+    }
+
     navigator.permissions?.query({ name: 'microphone' })
-      .then((result) => {
+      .then(result => {
         if (result.state === 'granted') startPassiveRef.current?.()
-        // If state changes to granted later (user clicks mic), passive starts via handleMicClick
         result.onchange = () => {
-          if (result.state === 'granted' && wakeModeRef.current === 'off') {
-            startPassiveRef.current?.()
-          }
+          if (result.state === 'granted' && wakeModeRef.current === 'off') startPassiveRef.current?.()
         }
       })
-      .catch(() => {
-        // Permissions API not supported — passive will start after first mic interaction
-      })
+      .catch(() => {})
+
     return () => {
       if (passiveRef.current) { passiveRef.current.abort(); passiveRef.current = null }
     }
-  }, []) // intentional — run once on mount
+  }, [])
 
   const handleMicClick = useCallback(() => {
     if (status === 'listening') { stopListening(); startPassiveListening() }
     else if (status === 'speaking') { stopAudio(); updateStatus('idle'); startPassiveListening() }
-    else if (status === 'idle') { stopPassiveListening(); startListening() }
+    else if (status === 'loading') { /* do nothing */ }
+    else { stopPassiveListening(); startListening() }
   }, [status, startListening, stopListening, startPassiveListening, stopPassiveListening, stopAudio, updateStatus])
 
   const handleTextSend = useCallback(() => {
@@ -482,133 +472,119 @@ export default function App() {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleTextSend() }
   }, [handleTextSend])
 
-  const isActive = status === 'listening' || status === 'speaking'
-
-  // Token counter math
-  const estimatedTokens = apiCallCount * TOKENS_PER_CALL
-  const estimatedCost = (estimatedTokens / 1000) * COST_PER_1K
-  const tokenDisplay = estimatedTokens >= 1000
-    ? `~${(estimatedTokens / 1000).toFixed(1)}k`
-    : `~${estimatedTokens}`
-  const costDisplay = estimatedCost < 0.01
-    ? `<0.1¢`
-    : `~${(estimatedCost * 100).toFixed(1)}¢`
-
   return (
     <div className="app">
+      {/* Scan beam */}
+      <div className="scanline" />
+
+      {/* Header */}
       <header className="header">
-        <div className="header-logo">
-          <span className="logo-diamond">◈</span>
-          <span className="logo-text">EVA</span>
+        <div className="header-left">
+          <span className="mode-badge">PERSONAL</span>
         </div>
+
+        <div className="header-center">
+          <span className="logo-diamond">◈</span>
+          <span className="logo-text">E.V.A</span>
+          <span className="logo-sub">— ETHAN'S VIRTUAL ASSISTANT</span>
+        </div>
+
         <div className="header-right">
-          <span className={`status-dot status-dot-${status}`} />
-          <span className="status-label">{status.toUpperCase()}</span>
+          {!spotifyAuth && (
+            <button className="spotify-connect-btn" onClick={initiateLogin}>
+              <SpotifyIcon /> CONNECT SPOTIFY
+            </button>
+          )}
+          <div className="header-status">
+            <span className={`status-dot status-dot-${status}`} />
+            <span style={{ fontSize: 9, letterSpacing: '2px', color: 'var(--text3)' }}>
+              {status.toUpperCase()}
+            </span>
+          </div>
         </div>
       </header>
 
+      {/* Dashboard */}
       <main className="main">
-        <div className="visualizer">
-          <Waveform active={isActive} type={status} />
-        </div>
+        <div className="widget-grid">
+          {/* Left column */}
+          <div className="widget-col">
+            <ClockWidget />
+            <NowPlaying playerState={playerState} onControl={handleNowPlayingControl} />
+          </div>
 
-        <div className="mic-area">
-          <button
-            className={`mic-btn mic-btn-${status}`}
-            onClick={handleMicClick}
-            disabled={status === 'loading'}
-            aria-label={status === 'listening' ? 'Stop' : 'Speak to EVA'}
-          >
-            {status === 'loading' ? <span className="spinner" /> : status === 'listening' ? <StopIcon /> : <MicIcon />}
-          </button>
-          <p className="mic-hint">
-            {activeTools.length > 0
-              ? `RUNNING: ${activeTools.map((t) => t.replace(/_/g, ' ').toUpperCase()).join(', ')}`
-              : STATUS_HINTS[status]}
-          </p>
-          <div className={`wake-indicator wake-indicator-${wakeMode === 'off' ? 'off' : wakeMode}`}>
-            <span className="wake-dot" />
-            <span className="wake-label">
-              {wakeMode === 'passive' ? 'PASSIVE — say "Hey EVA"' : wakeMode === 'awake' ? 'AWAKE' : 'click mic to enable wake word'}
-            </span>
+          {/* Center: Orb */}
+          <div className="orb-area">
+            <EvaOrb3D status={status} onClick={handleMicClick} />
+
+            <div className={`wake-indicator wake-indicator-${wakeMode}`}>
+              <span className="wake-dot" />
+              <span className="wake-label">
+                {wakeMode === 'passive' ? 'PASSIVE · say "Hey EVA"'
+                  : wakeMode === 'awake' ? 'AWAKE'
+                  : 'click orb to speak'}
+              </span>
+            </div>
+
+            {activeTools.length > 0 && (
+              <div className="active-tools">
+                ◈ {activeTools.map(t => t.replace(/_/g, ' ').toUpperCase()).join(', ')}
+              </div>
+            )}
+
+            {interimText && (
+              <div className="interim-wrap">
+                <div className="interim">
+                  <span className="interim-caret">›</span> {interimText}
+                </div>
+              </div>
+            )}
+
+            {speechError && (
+              <div className="speech-error">MIC ERROR: {speechError.replace(/-/g, ' ').toUpperCase()}</div>
+            )}
+
+            <div className="text-input-row">
+              <input
+                className="text-input"
+                type="text"
+                placeholder="type a message..."
+                value={textInput}
+                onChange={e => setTextInput(e.target.value)}
+                onKeyDown={handleTextKeyDown}
+                disabled={status === 'loading' || status === 'listening'}
+              />
+              <button
+                className="send-btn"
+                onClick={handleTextSend}
+                disabled={!textInput.trim() || status === 'loading' || status === 'listening'}
+              >
+                ›
+              </button>
+            </div>
+          </div>
+
+          {/* Right column */}
+          <div className="widget-col">
+            <WeatherWidget />
+            <MarketWidget />
           </div>
         </div>
 
-        {interimText && (
-          <div className="interim">
-            <span className="interim-caret">›</span> {interimText}
-          </div>
-        )}
-
-        {speechError && (
-          <div className="speech-error">
-            MIC ERROR: {speechError.replace(/-/g, ' ').toUpperCase()}
-          </div>
-        )}
-
-        <div className="text-input-row">
-          <input
-            className="text-input"
-            type="text"
-            placeholder="Or type here and press Enter..."
-            value={textInput}
-            onChange={(e) => setTextInput(e.target.value)}
-            onKeyDown={handleTextKeyDown}
-            disabled={status === 'loading' || status === 'listening'}
-          />
-          <button
-            className="send-btn"
-            onClick={handleTextSend}
-            disabled={!textInput.trim() || status === 'loading' || status === 'listening'}
-          >
-            ›
-          </button>
-        </div>
-
+        {/* Conversation log */}
         <ConversationLog conversation={conversation} />
       </main>
 
-      {/* Token counter — bottom right corner */}
-      <div className="token-strip">
-        <span className="ts-item ts-api">
-          <span className="ts-label">API</span>
-          <span className="ts-val">{apiCallCount}</span>
-        </span>
-        <span className="ts-sep">·</span>
-        <span className="ts-item">
-          <span className="ts-val">{tokenDisplay}</span>
-          <span className="ts-label"> tok</span>
-        </span>
-        <span className="ts-sep">·</span>
-        <span className="ts-item ts-cost">
-          <span className="ts-val">{costDisplay}</span>
-        </span>
-        {cacheHits > 0 && (
-          <>
-            <span className="ts-sep">·</span>
-            <span className="ts-item ts-cache" title="Cache hits this session">
-              <span className="ts-val">↺{cacheHits}</span>
-            </span>
-          </>
-        )}
-      </div>
+      {/* Status bar */}
+      <StatusBar apiCallCount={apiCallCount} cacheHits={cacheHits} />
     </div>
   )
 }
 
-function MicIcon() {
+function SpotifyIcon() {
   return (
-    <svg viewBox="0 0 24 24" fill="currentColor" width="30" height="30" aria-hidden>
-      <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
-      <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
-    </svg>
-  )
-}
-
-function StopIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="currentColor" width="28" height="28" aria-hidden>
-      <rect x="6" y="6" width="12" height="12" rx="2" />
+    <svg viewBox="0 0 24 24" fill="currentColor" width="11" height="11">
+      <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"/>
     </svg>
   )
 }

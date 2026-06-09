@@ -8,9 +8,17 @@ const GREETINGS = [
   "Good to hear from you. What's up?",
 ]
 
-// Returns one of: 'time'|'weather'|'news'|'calendar'|'math'|'greeting'|'stocks'|null
+// Returns one of: 'time'|'weather'|'news'|'calendar'|'math'|'greeting'|'stocks'|'music'|null
 export function classifyIntent(text) {
   const t = text.toLowerCase()
+
+  // Music commands — checked first so "play X" doesn't fall to stocks/news etc.
+  if (/^(pause|resume|unpause|pause music|stop music|stop the music)$/.test(t.trim())) return 'music'
+  if (/^(skip|next|next song|next track|previous|prev|previous song|go back|last song)$/.test(t.trim())) return 'music'
+  if (/\b(volume up|volume down|turn it up|turn it down|louder|quieter|lower the volume)\b/.test(t)) return 'music'
+  if (/\bwhat.{0,15}(playing|song|track)\b|now playing|currently playing/.test(t)) return 'music'
+  if (/\bplay.{0,20}playlist\b/.test(t)) return 'music'
+  if (/^play\s+\w/.test(t) && !/\b(game|chess|video|movie|film|podcast|youtube)\b/.test(t)) return 'music'
 
   if (/\b(what.{0,10}(time|date|day)|current time|what time|clock)\b/.test(t)) return 'time'
   if (/\b(weather|temperature|how.{0,8}(hot|cold|warm)|raining|sunny|forecast|outside)\b/.test(t)) return 'weather'
