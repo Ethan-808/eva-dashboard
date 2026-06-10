@@ -1,8 +1,8 @@
-// Response cache — localStorage, last 20 entries, 1-hour TTL
+// Response cache — localStorage, last 20 entries, 10-min TTL
 
 const CACHE_KEY = 'eva_response_cache'
 const CACHE_MAX = 20
-const CACHE_TTL = 60 * 60 * 1000
+const CACHE_TTL = 10 * 60 * 1000
 
 function tokenize(text) {
   return new Set(text.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean))

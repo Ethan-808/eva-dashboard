@@ -1,4 +1,6 @@
 // Local intent classifier — handles requests without hitting the Claude API
+import { isCalendarConnected } from './calendar/auth.js'
+import { fetchTodayEvents, formatEventTime } from './calendar/api.js'
 
 const GREETINGS = [
   "Hey Ethan, I'm here. What do you need?",
@@ -38,7 +40,7 @@ export function classifyIntent(text) {
 export function getMaxTokens(text) {
   const t = text.toLowerCase()
   const isLong = /\b(write|compose|draft|create|email|letter|essay|explain|summarize|list all|detailed|full)\b/.test(t)
-  return isLong ? 400 : 150
+  return isLong ? 400 : 120
 }
 
 // --- Fast-path handlers ---
@@ -108,7 +110,20 @@ export async function handleNews() {
   }
 }
 
-export function handleCalendar() {
+export async function handleCalendar() {
+  if (isCalendarConnected()) {
+    const events = await fetchTodayEvents()
+    if (!events.length) return "Your calendar is clear today."
+    const now = new Date()
+    const upcoming = events.filter(e => e.allDay || new Date(e.end) > now)
+    if (!upcoming.length) return "No more events today."
+    if (upcoming.length === 1) {
+      const e = upcoming[0]
+      return e.allDay ? `One event today: ${e.title}.` : `Next up: ${e.title} at ${formatEventTime(e)}.`
+    }
+    const next = upcoming[0]
+    return `${upcoming.length} events today. Next: ${next.title}${next.allDay ? '' : ` at ${formatEventTime(next)}`}.`
+  }
   const notes = JSON.parse(localStorage.getItem('eva_notes') || '[]')
   if (notes.length === 0) return "You have nothing saved on your schedule."
   const items = notes.map((n) => `${n.title}: ${n.content}`).join('. ')
@@ -183,4 +198,18 @@ export async function handleStocks(text) {
 
 export function handleGreeting() {
   return GREETINGS[Math.floor(Math.random() * GREETINGS.length)]
+}
+
+// Returns just the top headline title — used by morning briefing
+export async function getTopHeadline() {
+  const apiKey = import.meta.env.VITE_NEWS_API_KEY
+  if (!apiKey) return null
+  try {
+    const res = await fetch(`/api/news/v2/top-headlines?country=us&pageSize=1&apiKey=${apiKey}`)
+    if (!res.ok) throw new Error()
+    const data = await res.json()
+    return data.articles?.[0]?.title || null
+  } catch {
+    return null
+  }
 }
