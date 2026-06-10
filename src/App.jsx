@@ -263,6 +263,7 @@ export default function App() {
   const silenceTimerRef = useRef(null)
   const activeSilenceTimerRef = useRef(null)
   const startActiveSilenceTimerRef = useRef(null)
+  const speakingCooldownRef = useRef(null)
   const audioQueueRef = useRef([])
   const isPlayingAudioRef = useRef(false)
   const spokenBoundaryRef = useRef(0)
@@ -316,12 +317,15 @@ export default function App() {
       isPlayingAudioRef.current = false
       if (statusRef.current === 'speaking') {
         updateStatus('idle')
-        if (wakeModeRef.current === 'active') {
-          startActiveSilenceTimerRef.current?.()
-          startListeningRef.current?.()
-        } else {
-          startPassiveRef.current?.()
-        }
+        clearTimeout(speakingCooldownRef.current)
+        speakingCooldownRef.current = setTimeout(() => {
+          if (wakeModeRef.current === 'active') {
+            startActiveSilenceTimerRef.current?.()
+            startListeningRef.current?.()
+          } else {
+            startPassiveRef.current?.()
+          }
+        }, 1500)
       }
       return
     }
@@ -365,6 +369,9 @@ export default function App() {
   const queueSpeakChunk = useCallback(async (text, { newsRate = false } = {}) => {
     const cleaned = cleanForTTS(text)
     if (!cleaned) return
+    clearTimeout(speakingCooldownRef.current)
+    if (recognitionRef.current) { recognitionRef.current.abort(); recognitionRef.current = null }
+    if (passiveRef.current) { passiveRef.current.abort(); passiveRef.current = null }
     updateStatus('speaking')
     const elevenKey = import.meta.env.VITE_ELEVENLABS_API_KEY
     if (elevenKey) {
@@ -445,77 +452,51 @@ export default function App() {
   }, [])
 
   const runMorningBriefing = useCallback(async () => {
-    const waitForSpeech = () => new Promise(resolve => {
-      const poll = () => statusRef.current !== 'speaking' ? resolve() : setTimeout(poll, 150)
-      setTimeout(poll, 50)
-    })
-
-    // 1. Time greeting
     const now = new Date()
     const timeStr = now.toLocaleTimeString('en-US', { timeZone: 'Pacific/Honolulu', hour: 'numeric', minute: '2-digit', hour12: true })
     const dayStr = now.toLocaleDateString('en-US', { timeZone: 'Pacific/Honolulu', weekday: 'long', month: 'long', day: 'numeric' })
     const greeting = `Good morning Ethan, it's ${timeStr} on ${dayStr}.`
-    addDisplayMessage({ role: 'assistant', content: greeting, isIntent: true })
-    speak(greeting)
-    await waitForSpeech()
 
-    // 2. Weather
-    let weatherLine = "Weather data unavailable right now."
-    try {
-      const wt = await handleWeather('weather in Honolulu')
-      if (wt) weatherLine = wt
-    } catch {}
-    addDisplayMessage({ role: 'assistant', content: weatherLine, isIntent: true })
-    speak(weatherLine)
-    await waitForSpeech()
+    const [weatherLine, newsLine, marketsLine, motivLine] = await Promise.all([
+      // Weather
+      handleWeather('weather in Honolulu')
+        .then(wt => wt || "Weather data unavailable right now.")
+        .catch(() => "Weather data unavailable right now."),
 
-    // 3. Top headline
-    let newsLine = "No top headlines available right now."
-    try {
-      const headline = await getTopHeadline()
-      if (headline) newsLine = `Top story: ${headline}.`
-    } catch {}
-    addDisplayMessage({ role: 'assistant', content: newsLine, isIntent: true })
-    speak(newsLine)
-    await waitForSpeech()
+      // Top headline
+      getTopHeadline()
+        .then(h => h ? `Top story: ${h}.` : "No top headlines available right now.")
+        .catch(() => "No top headlines available right now."),
 
-    // 4. Markets: SPY + BTC
-    let marketsLine = "Market data unavailable right now."
-    try {
-      const apiKey = import.meta.env.VITE_FINNHUB_API_KEY
-      if (apiKey) {
-        const [spyRes, btcRes] = await Promise.all([
-          fetch(`/api/finnhub/api/v1/quote?symbol=SPY&token=${apiKey}`),
-          fetch(`/api/finnhub/api/v1/quote?symbol=BINANCE:BTCUSDT&token=${apiKey}`),
-        ])
-        const spy = spyRes.ok ? await spyRes.json() : null
-        const btc = btcRes.ok ? await btcRes.json() : null
-        const parts = []
-        if (spy?.c) {
-          const dir = (spy.dp ?? 0) >= 0 ? 'up' : 'down'
-          parts.push(`SPY ${dir} ${Math.abs(spy.dp ?? 0).toFixed(1)}% at $${spy.c.toFixed(0)}`)
-        }
-        if (btc?.c) {
-          const dir = (btc.dp ?? 0) >= 0 ? 'up' : 'down'
-          const price = btc.c.toLocaleString('en-US', { maximumFractionDigits: 0 })
-          parts.push(`Bitcoin ${dir} ${Math.abs(btc.dp ?? 0).toFixed(1)}% at $${price}`)
-        }
-        if (parts.length) marketsLine = `${parts.join(', ')}.`
-      }
-    } catch {}
-    addDisplayMessage({ role: 'assistant', content: marketsLine, isIntent: true })
-    speak(marketsLine)
-    await waitForSpeech()
+      // Markets: SPY + BTC
+      (async () => {
+        const apiKey = import.meta.env.VITE_FINNHUB_API_KEY
+        if (!apiKey) return "Market data unavailable right now."
+        try {
+          const [spyRes, btcRes] = await Promise.all([
+            fetch(`/api/finnhub/api/v1/quote?symbol=SPY&token=${apiKey}`),
+            fetch(`/api/finnhub/api/v1/quote?symbol=BINANCE:BTCUSDT&token=${apiKey}`),
+          ])
+          const spy = spyRes.ok ? await spyRes.json() : null
+          const btc = btcRes.ok ? await btcRes.json() : null
+          const parts = []
+          if (spy?.c) {
+            const dir = (spy.dp ?? 0) >= 0 ? 'up' : 'down'
+            parts.push(`SPY ${dir} ${Math.abs(spy.dp ?? 0).toFixed(1)}% at $${spy.c.toFixed(0)}`)
+          }
+          if (btc?.c) {
+            const dir = (btc.dp ?? 0) >= 0 ? 'up' : 'down'
+            const price = btc.c.toLocaleString('en-US', { maximumFractionDigits: 0 })
+            parts.push(`Bitcoin ${dir} ${Math.abs(btc.dp ?? 0).toFixed(1)}% at $${price}`)
+          }
+          return parts.length ? `${parts.join(', ')}.` : "Market data unavailable right now."
+        } catch { return "Market data unavailable right now." }
+      })(),
 
-    // 5. Motivational line — single Claude call, max 50 tokens
-    let motivLine = "Make today count."
-    try {
-      const res = await fetch(API_URL, {
+      // Motivational line
+      fetch(API_URL, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
+        headers: { 'Content-Type': 'application/json', 'anthropic-dangerous-direct-browser-access': 'true' },
         body: JSON.stringify({
           model: MODEL,
           max_tokens: 50,
@@ -524,14 +505,16 @@ export default function App() {
           stream: false,
         }),
       })
-      if (res.ok) {
-        const data = await res.json()
-        const text = data.content?.[0]?.text?.trim()
-        if (text) motivLine = text
-      }
-    } catch {}
-    addDisplayMessage({ role: 'assistant', content: motivLine, isIntent: true })
-    speak(motivLine)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => d?.content?.[0]?.text?.trim() || "Make today count.")
+        .catch(() => "Make today count."),
+    ])
+
+    for (const line of [greeting, weatherLine, newsLine, marketsLine, motivLine]) {
+      addDisplayMessage({ role: 'assistant', content: line, isIntent: true })
+    }
+
+    speak([greeting, weatherLine, newsLine, marketsLine, motivLine].join(', '))
   }, [speak, addDisplayMessage])
 
   const sendToEva = useCallback(async (userText) => {
