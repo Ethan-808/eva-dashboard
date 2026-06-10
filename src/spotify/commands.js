@@ -1,9 +1,17 @@
 import * as api from './api.js'
 import { getDeviceId } from './player.js'
 
+async function resolveDevice() {
+  const cached = getDeviceId()
+  if (cached) return cached
+  const res = await api.getDevices()
+  return res?.devices?.find(d => d.is_active)?.id ?? null
+}
+
+const NO_DEVICE = "No active Spotify device found — open Spotify on your Mac first."
+
 export async function handleMusicCommand(text, volume, setVolume) {
   const t = text.toLowerCase().trim()
-  const deviceId = getDeviceId()
 
   // What's playing
   if (/what.{0,15}(playing|song|track)|now playing|currently playing/.test(t)) {
@@ -17,35 +25,40 @@ export async function handleMusicCommand(text, volume, setVolume) {
 
   // Pause / stop
   if (/^(pause|pause music|stop music|stop the music)$/.test(t)) {
-    if (!deviceId) return "Spotify isn't connected yet — try connecting first."
+    const deviceId = await resolveDevice()
+    if (!deviceId) return NO_DEVICE
     try { await api.pause(deviceId); return "Paused." }
     catch { return "Couldn't pause." }
   }
 
   // Resume
   if (/^(resume|resume music|unpause)$/.test(t)) {
-    if (!deviceId) return "Spotify isn't connected yet."
+    const deviceId = await resolveDevice()
+    if (!deviceId) return NO_DEVICE
     try { await api.play(deviceId); return "Resuming." }
     catch { return "Couldn't resume." }
   }
 
   // Skip / next
   if (/^(skip|next|next song|next track|skip song|skip track)$/.test(t)) {
-    if (!deviceId) return "Spotify isn't connected yet."
+    const deviceId = await resolveDevice()
+    if (!deviceId) return NO_DEVICE
     try { await api.next(deviceId); return "Skipping." }
     catch { return "Couldn't skip." }
   }
 
   // Previous
   if (/^(previous|prev|previous song|previous track|go back|last song)$/.test(t)) {
-    if (!deviceId) return "Spotify isn't connected yet."
+    const deviceId = await resolveDevice()
+    if (!deviceId) return NO_DEVICE
     try { await api.previous(deviceId); return "Going back." }
     catch { return "Couldn't go back." }
   }
 
   // Volume up
   if (/volume up|turn it up|louder/.test(t)) {
-    if (!deviceId) return "Spotify isn't connected yet."
+    const deviceId = await resolveDevice()
+    if (!deviceId) return NO_DEVICE
     const newVol = Math.min(100, volume + 10)
     try { await api.setVolume(deviceId, newVol); setVolume(newVol); return `Volume at ${newVol}%.` }
     catch { return "Couldn't adjust volume." }
@@ -53,7 +66,8 @@ export async function handleMusicCommand(text, volume, setVolume) {
 
   // Volume down
   if (/volume down|turn it down|quieter|lower the volume/.test(t)) {
-    if (!deviceId) return "Spotify isn't connected yet."
+    const deviceId = await resolveDevice()
+    if (!deviceId) return NO_DEVICE
     const newVol = Math.max(0, volume - 10)
     try { await api.setVolume(deviceId, newVol); setVolume(newVol); return `Volume at ${newVol}%.` }
     catch { return "Couldn't adjust volume." }
@@ -63,7 +77,8 @@ export async function handleMusicCommand(text, volume, setVolume) {
   const playlistMatch = t.match(/play(?:\s+my)?\s+(.+?)\s+playlist/)
   if (playlistMatch) {
     const query = playlistMatch[1].trim()
-    if (!deviceId) return "Spotify isn't connected yet."
+    const deviceId = await resolveDevice()
+    if (!deviceId) return NO_DEVICE
     try {
       const playlists = await api.getUserPlaylists()
       const found = playlists?.items?.find(p => p.name.toLowerCase().includes(query))
@@ -71,7 +86,6 @@ export async function handleMusicCommand(text, volume, setVolume) {
         await api.play(deviceId, { context_uri: found.uri })
         return `Playing your ${found.name} playlist.`
       }
-      // Fallback: search Spotify
       const results = await api.search(`${query} playlist`, ['playlist'])
       const pl = results?.playlists?.items?.[0]
       if (pl) {
@@ -86,7 +100,8 @@ export async function handleMusicCommand(text, volume, setVolume) {
   const playMatch = t.match(/^play\s+(.+)$/)
   if (playMatch) {
     const query = playMatch[1].trim()
-    if (!deviceId) return "Spotify isn't connected yet."
+    const deviceId = await resolveDevice()
+    if (!deviceId) return NO_DEVICE
     try {
       const results = await api.search(query, ['track', 'artist'])
       const track = results?.tracks?.items?.[0]

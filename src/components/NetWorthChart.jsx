@@ -41,12 +41,19 @@ export default function NetWorthChart({ history = [], isVisible = true }) {
   const today = new Date().toISOString().slice(0, 10)
   const displayHistory = history.length > 0 ? history : [{ date: today, amount: 0 }]
 
+  // Resize when panel becomes visible (was initialized with display:none)
+  useEffect(() => {
+    if (isVisible && chartRef.current) {
+      chartRef.current.resize()
+    }
+  }, [isVisible])
+
   // Destroy only on unmount
   useEffect(() => {
     return () => { chartRef.current?.destroy(); chartRef.current = null }
   }, [])
 
-  // Create or update chart — deferred until visible so canvas has real dimensions
+  // Create or update chart when data/range changes
   useEffect(() => {
     const rangeDays = RANGES.find(r => r.label === range)?.days ?? Infinity
     const data = filterHistory(displayHistory, rangeDays)
@@ -62,8 +69,7 @@ export default function NetWorthChart({ history = [], isVisible = true }) {
       return
     }
 
-    // Don't create while hidden — canvas is 0×0 inside display:none
-    if (!isVisible || !canvasRef.current) return
+    if (!canvasRef.current) return
 
     const ctx = canvasRef.current.getContext('2d')
     const h   = 150
@@ -139,7 +145,7 @@ export default function NetWorthChart({ history = [], isVisible = true }) {
         },
       },
     })
-  }, [history, range, isVisible])
+  }, [history, range])
 
   return (
     <div className="nw-chart-wrap">

@@ -25,28 +25,37 @@ export async function search(query, types = ['track']) {
   return spotifyFetch(`/search?q=${encodeURIComponent(query)}&type=${types.join(',')}&limit=5`)
 }
 
+export async function getDevices() {
+  return spotifyFetch('/me/player/devices')
+}
+
 export async function play(deviceId, options = {}) {
-  return spotifyFetch(`/me/player/play?device_id=${deviceId}`, {
+  const q = deviceId ? `?device_id=${deviceId}` : ''
+  return spotifyFetch(`/me/player/play${q}`, {
     method: 'PUT',
     body: JSON.stringify(options),
   })
 }
 
 export async function pause(deviceId) {
-  return spotifyFetch(`/me/player/pause?device_id=${deviceId}`, { method: 'PUT' })
+  const q = deviceId ? `?device_id=${deviceId}` : ''
+  return spotifyFetch(`/me/player/pause${q}`, { method: 'PUT' })
 }
 
 export async function next(deviceId) {
-  return spotifyFetch(`/me/player/next?device_id=${deviceId}`, { method: 'POST' })
+  const q = deviceId ? `?device_id=${deviceId}` : ''
+  return spotifyFetch(`/me/player/next${q}`, { method: 'POST' })
 }
 
 export async function previous(deviceId) {
-  return spotifyFetch(`/me/player/previous?device_id=${deviceId}`, { method: 'POST' })
+  const q = deviceId ? `?device_id=${deviceId}` : ''
+  return spotifyFetch(`/me/player/previous${q}`, { method: 'POST' })
 }
 
 export async function setVolume(deviceId, percent) {
+  const q = deviceId ? `&device_id=${deviceId}` : ''
   return spotifyFetch(
-    `/me/player/volume?volume_percent=${Math.round(percent)}&device_id=${deviceId}`,
+    `/me/player/volume?volume_percent=${Math.round(percent)}${q}`,
     { method: 'PUT' }
   )
 }
