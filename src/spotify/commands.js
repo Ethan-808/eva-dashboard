@@ -16,7 +16,7 @@ export async function handleMusicCommand(text, volume, setVolume) {
   // What's playing
   if (/what.{0,15}(playing|song|track)|now playing|currently playing/.test(t)) {
     try {
-      const playback = await api.getCurrentPlayback()
+      const playback = await api.getCurrentlyPlaying()
       if (!playback?.item) return "Nothing is playing right now."
       const artist = playback.item.artists.map(a => a.name).join(', ')
       return `Now playing ${playback.item.name} by ${artist}.`
@@ -73,6 +73,22 @@ export async function handleMusicCommand(text, volume, setVolume) {
     catch { return "Couldn't adjust volume." }
   }
 
+  // Add [song] to queue
+  const queueMatch = t.match(/^add\s+(.+?)\s+to\s+(?:the\s+)?queue$/)
+  if (queueMatch) {
+    const query = queueMatch[1].trim()
+    const deviceId = await resolveDevice()
+    if (!deviceId) return NO_DEVICE
+    try {
+      const results = await api.search(query, ['track'])
+      const track = results?.tracks?.items?.[0]
+      if (!track) return `Couldn't find "${query}" on Spotify.`
+      await api.addToQueue(track.uri, deviceId)
+      const artist = track.artists[0]?.name
+      return `Added ${track.name}${artist ? ` by ${artist}` : ''} to the queue.`
+    } catch (err) { return `Couldn't add to queue: ${err.message}` }
+  }
+
   // Play my [x] playlist — check before generic "play" so it takes priority
   const playlistMatch = t.match(/play(?:\s+my)?\s+(.+?)\s+playlist/)
   if (playlistMatch) {
@@ -103,7 +119,16 @@ export async function handleMusicCommand(text, volume, setVolume) {
     const deviceId = await resolveDevice()
     if (!deviceId) return NO_DEVICE
     try {
-      const results = await api.search(query, ['track', 'artist'])
+      if (query.includes('playlist')) {
+        const results = await api.search(query, ['playlist'])
+        const pl = results?.playlists?.items?.[0]
+        if (pl) {
+          await api.play(deviceId, { context_uri: pl.uri })
+          return `Playing ${pl.name}.`
+        }
+        return `Couldn't find a playlist matching "${query}".`
+      }
+      const results = await api.search(query, ['track', 'playlist'])
       const track = results?.tracks?.items?.[0]
       if (track) {
         await api.play(deviceId, { uris: [track.uri] })

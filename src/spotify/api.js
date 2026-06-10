@@ -64,6 +64,15 @@ export async function getCurrentPlayback() {
   return spotifyFetch('/me/player?additional_types=track')
 }
 
+export async function getCurrentlyPlaying() {
+  return spotifyFetch('/me/player/currently-playing?additional_types=track')
+}
+
+export async function addToQueue(trackUri, deviceId) {
+  const q = `uri=${encodeURIComponent(trackUri)}${deviceId ? `&device_id=${deviceId}` : ''}`
+  return spotifyFetch(`/me/player/queue?${q}`, { method: 'POST' })
+}
+
 export async function getUserPlaylists() {
   return spotifyFetch('/me/playlists?limit=50')
 }
