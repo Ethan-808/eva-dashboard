@@ -3,6 +3,8 @@ import { getToken } from './auth.js'
 let player = null
 let _deviceId = null
 let _onStateChange = null
+let _reconnectTimer = null
+let _reconnectAttempts = 0
 
 // Check for Player constructor specifically — the SDK script may define window.Spotify
 // before calling onSpotifyWebPlaybackSDKReady, so window.Spotify alone isn't a safe guard.
@@ -12,6 +14,23 @@ const sdkReady = window.Spotify?.Player
       const prev = window.onSpotifyWebPlaybackSDKReady
       window.onSpotifyWebPlaybackSDKReady = () => { prev?.(); resolve() }
     })
+
+function scheduleReconnect() {
+  if (_reconnectTimer) return
+  const delay = Math.min(1000 * 2 ** _reconnectAttempts, 30000)
+  _reconnectAttempts++
+  _reconnectTimer = setTimeout(() => {
+    _reconnectTimer = null
+    if (player && !_deviceId) player.connect()
+  }, delay)
+}
+
+// Re-connect when the tab comes back into focus (browser may have killed the WS)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && player && !_deviceId) {
+    scheduleReconnect()
+  }
+})
 
 export async function initPlayer(onStateChange) {
   _onStateChange = onStateChange
@@ -37,20 +56,30 @@ export async function initPlayer(onStateChange) {
       name: 'EVA Dashboard',
       getOAuthToken: async cb => {
         const token = await getToken()
-        if (token) cb(token)
+        if (token) {
+          cb(token)
+        } else {
+          // Auth gone — destroy so caller can re-initiate login
+          destroyPlayer()
+        }
       },
       volume: 0.5,
     })
 
     player.addListener('ready', ({ device_id }) => {
       clearTimeout(timeout)
+      _reconnectAttempts = 0
+      if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null }
       _deviceId = device_id
       resolve(device_id)
     })
 
     player.addListener('not_ready', ({ device_id }) => {
       console.warn('[EVA Spotify] Device offline:', device_id)
-      if (_deviceId === device_id) _deviceId = null
+      if (_deviceId === device_id) {
+        _deviceId = null
+        scheduleReconnect()
+      }
     })
 
     player.addListener('player_state_changed', state => {

@@ -100,12 +100,19 @@ async function doRefresh(refresh_token) {
   return updated.access_token
 }
 
+// Deduplicate concurrent refreshes — PKCE uses rotating tokens so two
+// simultaneous calls would burn the token on the second attempt.
+let _pendingRefresh = null
+
 export async function getToken() {
   const stored = JSON.parse(localStorage.getItem(TOKEN_KEY) || 'null')
   if (!stored) return null
   // Refresh 5 minutes before expiry
   if (Date.now() > stored.expires_at - 5 * 60 * 1000) {
-    return doRefresh(stored.refresh_token)
+    if (!_pendingRefresh) {
+      _pendingRefresh = doRefresh(stored.refresh_token).finally(() => { _pendingRefresh = null })
+    }
+    return _pendingRefresh
   }
   return stored.access_token
 }
