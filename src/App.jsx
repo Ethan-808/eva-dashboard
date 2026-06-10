@@ -444,6 +444,96 @@ export default function App() {
     } catch {}
   }, [])
 
+  const runMorningBriefing = useCallback(async () => {
+    const waitForSpeech = () => new Promise(resolve => {
+      const poll = () => statusRef.current !== 'speaking' ? resolve() : setTimeout(poll, 150)
+      setTimeout(poll, 50)
+    })
+
+    // 1. Time greeting
+    const now = new Date()
+    const timeStr = now.toLocaleTimeString('en-US', { timeZone: 'Pacific/Honolulu', hour: 'numeric', minute: '2-digit', hour12: true })
+    const dayStr = now.toLocaleDateString('en-US', { timeZone: 'Pacific/Honolulu', weekday: 'long', month: 'long', day: 'numeric' })
+    const greeting = `Good morning Ethan, it's ${timeStr} on ${dayStr}.`
+    addDisplayMessage({ role: 'assistant', content: greeting, isIntent: true })
+    speak(greeting)
+    await waitForSpeech()
+
+    // 2. Weather
+    let weatherLine = "Weather data unavailable right now."
+    try {
+      const wt = await handleWeather('weather in Honolulu')
+      if (wt) weatherLine = wt
+    } catch {}
+    addDisplayMessage({ role: 'assistant', content: weatherLine, isIntent: true })
+    speak(weatherLine)
+    await waitForSpeech()
+
+    // 3. Top headline
+    let newsLine = "No top headlines available right now."
+    try {
+      const headline = await getTopHeadline()
+      if (headline) newsLine = `Top story: ${headline}.`
+    } catch {}
+    addDisplayMessage({ role: 'assistant', content: newsLine, isIntent: true })
+    speak(newsLine)
+    await waitForSpeech()
+
+    // 4. Markets: SPY + BTC
+    let marketsLine = "Market data unavailable right now."
+    try {
+      const apiKey = import.meta.env.VITE_FINNHUB_API_KEY
+      if (apiKey) {
+        const [spyRes, btcRes] = await Promise.all([
+          fetch(`/api/finnhub/api/v1/quote?symbol=SPY&token=${apiKey}`),
+          fetch(`/api/finnhub/api/v1/quote?symbol=BINANCE:BTCUSDT&token=${apiKey}`),
+        ])
+        const spy = spyRes.ok ? await spyRes.json() : null
+        const btc = btcRes.ok ? await btcRes.json() : null
+        const parts = []
+        if (spy?.c) {
+          const dir = (spy.dp ?? 0) >= 0 ? 'up' : 'down'
+          parts.push(`SPY ${dir} ${Math.abs(spy.dp ?? 0).toFixed(1)}% at $${spy.c.toFixed(0)}`)
+        }
+        if (btc?.c) {
+          const dir = (btc.dp ?? 0) >= 0 ? 'up' : 'down'
+          const price = btc.c.toLocaleString('en-US', { maximumFractionDigits: 0 })
+          parts.push(`Bitcoin ${dir} ${Math.abs(btc.dp ?? 0).toFixed(1)}% at $${price}`)
+        }
+        if (parts.length) marketsLine = `${parts.join(', ')}.`
+      }
+    } catch {}
+    addDisplayMessage({ role: 'assistant', content: marketsLine, isIntent: true })
+    speak(marketsLine)
+    await waitForSpeech()
+
+    // 5. Motivational line — single Claude call, max 50 tokens
+    let motivLine = "Make today count."
+    try {
+      const res = await fetch(API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: MODEL,
+          max_tokens: 50,
+          system: SYSTEM_PROMPT,
+          messages: [{ role: 'user', content: "Give Ethan one short motivational line to start his morning. Be direct and specific to his world. No quotes, no attribution. Under 15 words." }],
+          stream: false,
+        }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        const text = data.content?.[0]?.text?.trim()
+        if (text) motivLine = text
+      }
+    } catch {}
+    addDisplayMessage({ role: 'assistant', content: motivLine, isIntent: true })
+    speak(motivLine)
+  }, [speak, addDisplayMessage])
+
   const sendToEva = useCallback(async (userText) => {
     // Close finance panel
     if (/\b(close|hide|dismiss|collapse).*(finance|panel|chart)\b/i.test(userText)) {
@@ -462,6 +552,13 @@ export default function App() {
       updateWakeMode('passive')
       speak('Going to sleep.')
       setTimeout(() => startPassiveRef.current?.(), 1200)
+      return
+    }
+
+    // Morning briefing
+    if (/\b(good\s+morning|morning\s+briefing)\b/i.test(userText)) {
+      addDisplayMessage({ role: 'user', content: userText })
+      runMorningBriefing()
       return
     }
 
@@ -677,7 +774,7 @@ export default function App() {
         startPassiveRef.current?.()
       }
     }
-  }, [addMessage, addDisplayMessage, speak, trySpeakNext, updateStatus, updateWakeMode, clearActiveSilenceTimer, volume])
+  }, [addMessage, addDisplayMessage, speak, trySpeakNext, updateStatus, updateWakeMode, clearActiveSilenceTimer, volume, runMorningBriefing])
 
   const startListening = useCallback(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition
