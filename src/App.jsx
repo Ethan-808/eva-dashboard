@@ -1,12 +1,15 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react'
 import EvaOrb3D from './components/EvaOrb3D'
 import StarField from './components/StarField'
-import WeatherWidget from './components/WeatherWidget'
+import WeatherVisual from './components/WeatherVisual'
+import StockVisual from './components/StockVisual'
+import NewsVisual from './components/NewsVisual'
+import MorningBriefingVisual from './components/MorningBriefingVisual'
 import NowPlaying from './components/NowPlaying'
 import ConversationLog from './components/ConversationLog'
 import FinanceWidget from './components/FinanceWidget'
 import {
-  classifyIntent, getMaxTokens, getTopHeadline,
+  classifyIntent, getMaxTokens,
   handleTime, handleWeather, handleNews, handleCalendar, handleMath, handleGreeting, handleStocks,
 } from './intent.js'
 import { getCached, setCached } from './cache.js'
@@ -125,6 +128,71 @@ const TOOLS = [
     },
   },
 ]
+
+async function fetchWeatherData(location = 'Honolulu') {
+  const apiKey = import.meta.env.VITE_OPENWEATHER_API_KEY
+  if (apiKey) {
+    try {
+      const res = await fetch(`/api/weather/data/2.5/weather?q=${encodeURIComponent(location)}&appid=${apiKey}&units=imperial`)
+      if (res.ok) {
+        const d = await res.json()
+        return { temp: Math.round(d.main.temp), desc: d.weather[0].description, city: d.name }
+      }
+    } catch {}
+  }
+  try {
+    const res = await fetch(`https://wttr.in/${encodeURIComponent(location)}?format=j1`)
+    if (res.ok) {
+      const d = await res.json()
+      const c = d.current_condition[0]
+      return { temp: parseInt(c.temp_F), desc: c.weatherDesc[0].value, city: d.nearest_area?.[0]?.areaName?.[0]?.value || location }
+    }
+  } catch {}
+  return null
+}
+
+async function fetchStocksForVisual() {
+  const apiKey = import.meta.env.VITE_FINNHUB_API_KEY
+  if (!apiKey) return null
+  const now  = Math.floor(Date.now() / 1000)
+  const from = now - 7200
+  const syms = ['SPY', 'QQQ', 'BINANCE:BTCUSDT']
+  const keys = ['spy', 'qqq', 'btc']
+  try {
+    const results = await Promise.allSettled(
+      syms.map(sym => Promise.all([
+        fetch(`/api/finnhub/api/v1/quote?symbol=${encodeURIComponent(sym)}&token=${apiKey}`).then(r => r.json()),
+        fetch(`/api/finnhub/api/v1/stock/candle?symbol=${encodeURIComponent(sym)}&resolution=5&from=${from}&to=${now}&token=${apiKey}`).then(r => r.json()),
+      ]))
+    )
+    const stocks = {}
+    results.forEach((r, i) => {
+      if (r.status !== 'fulfilled') return
+      const [quote, candle] = r.value
+      if (!quote?.c) return
+      stocks[keys[i]] = {
+        price: quote.c,
+        pct:   quote.dp ?? 0,
+        history: candle?.c?.length > 2 ? candle.c : [quote.pc ?? quote.c, quote.c],
+      }
+    })
+    return Object.keys(stocks).length ? stocks : null
+  } catch { return null }
+}
+
+async function fetchNewsForVisual() {
+  const apiKey = import.meta.env.VITE_NEWS_API_KEY
+  if (!apiKey) return null
+  try {
+    const res = await fetch(`/api/news/v2/top-headlines?country=us&pageSize=5&apiKey=${apiKey}`)
+    if (!res.ok) return null
+    const data = await res.json()
+    return data.articles?.slice(0, 5).map(a => ({
+      title: a.title,
+      source: a.source?.name || '',
+    })) || null
+  } catch { return null }
+}
 
 function cleanForTTS(text) {
   return text
@@ -246,10 +314,20 @@ export default function App() {
 
   // Panel visibility
   const [showConvo,   setShowConvo]   = useState(false)
-  const [showWeather, setShowWeather] = useState(false)
   const [showFinance, setShowFinance] = useState(false)
-  const convoTimerRef   = useRef(null)
-  const weatherTimerRef = useRef(null)
+  const convoTimerRef = useRef(null)
+
+  // Visual panels
+  const [showWeatherVisual,  setShowWeatherVisual]  = useState(false)
+  const [weatherVisualData,  setWeatherVisualData]  = useState(null)
+  const [showStockVisual,    setShowStockVisual]    = useState(false)
+  const [stockVisualData,    setStockVisualData]    = useState(null)
+  const [showNewsVisual,     setShowNewsVisual]     = useState(false)
+  const [newsVisualData,     setNewsVisualData]     = useState(null)
+  const [showMorningBriefing,   setShowMorningBriefing]   = useState(false)
+  const [morningBriefingData,   setMorningBriefingData]   = useState(null)
+  const [morningBriefingPhase,  setMorningBriefingPhase]  = useState(0)
+  const mbTimersRef = useRef([])
 
   const statusRef = useRef('idle')
   const wakeModeRef = useRef('off')
@@ -452,23 +530,28 @@ export default function App() {
   }, [])
 
   const runMorningBriefing = useCallback(async () => {
+    mbTimersRef.current.forEach(clearTimeout)
+    mbTimersRef.current = []
+
     const now = new Date()
     const timeStr = now.toLocaleTimeString('en-US', { timeZone: 'Pacific/Honolulu', hour: 'numeric', minute: '2-digit', hour12: true })
-    const dayStr = now.toLocaleDateString('en-US', { timeZone: 'Pacific/Honolulu', weekday: 'long', month: 'long', day: 'numeric' })
+    const dayStr  = now.toLocaleDateString('en-US', { timeZone: 'Pacific/Honolulu', weekday: 'long', month: 'long', day: 'numeric' })
     const greeting = `Good morning Ethan, it's ${timeStr} on ${dayStr}.`
 
-    const [weatherLine, newsLine, marketsLine, motivLine] = await Promise.all([
-      // Weather
-      handleWeather('weather in Honolulu')
-        .then(wt => wt || "Weather data unavailable right now.")
-        .catch(() => "Weather data unavailable right now."),
+    setShowMorningBriefing(true)
+    setMorningBriefingData(null)
+    setMorningBriefingPhase(1)
 
-      // Top headline
-      getTopHeadline()
-        .then(h => h ? `Top story: ${h}.` : "No top headlines available right now.")
-        .catch(() => "No top headlines available right now."),
+    mbTimersRef.current = [
+      setTimeout(() => setMorningBriefingPhase(2), 4500),
+      setTimeout(() => setMorningBriefingPhase(3), 9000),
+      setTimeout(() => setMorningBriefingPhase(4), 13000),
+      setTimeout(() => { setShowMorningBriefing(false); setMorningBriefingPhase(0) }, 21000),
+    ]
 
-      // Markets: SPY + BTC
+    const [weatherData, newsArticles, marketsLine, motivLine] = await Promise.all([
+      fetchWeatherData().catch(() => null),
+      fetchNewsForVisual().catch(() => null),
       (async () => {
         const apiKey = import.meta.env.VITE_FINNHUB_API_KEY
         if (!apiKey) return "Market data unavailable right now."
@@ -486,35 +569,34 @@ export default function App() {
           }
           if (btc?.c) {
             const dir = (btc.dp ?? 0) >= 0 ? 'up' : 'down'
-            const price = btc.c.toLocaleString('en-US', { maximumFractionDigits: 0 })
-            parts.push(`Bitcoin ${dir} ${Math.abs(btc.dp ?? 0).toFixed(1)}% at $${price}`)
+            parts.push(`Bitcoin ${dir} ${Math.abs(btc.dp ?? 0).toFixed(1)}% at $${btc.c.toLocaleString('en-US', { maximumFractionDigits: 0 })}`)
           }
           return parts.length ? `${parts.join(', ')}.` : "Market data unavailable right now."
         } catch { return "Market data unavailable right now." }
       })(),
-
-      // Motivational line
       fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'anthropic-dangerous-direct-browser-access': 'true' },
         body: JSON.stringify({
-          model: MODEL,
-          max_tokens: 50,
-          system: SYSTEM_PROMPT,
+          model: MODEL, max_tokens: 50, system: SYSTEM_PROMPT,
           messages: [{ role: 'user', content: "Give Ethan one short motivational line to start his morning. Be direct and specific to his world. No quotes, no attribution. Under 15 words." }],
           stream: false,
         }),
-      })
-        .then(r => r.ok ? r.json() : null)
-        .then(d => d?.content?.[0]?.text?.trim() || "Make today count.")
-        .catch(() => "Make today count."),
+      }).then(r => r.ok ? r.json() : null).then(d => d?.content?.[0]?.text?.trim() || "Make today count.").catch(() => "Make today count."),
     ])
+
+    const weatherLine = weatherData
+      ? `In ${weatherData.city || 'Honolulu'}, it's ${weatherData.desc} and ${weatherData.temp}°F.`
+      : "Weather data unavailable right now."
+    const rawHeadline = newsArticles?.[0]?.title || null
+    const newsLine = rawHeadline ? `Top story: ${rawHeadline}.` : "No top headlines available right now."
+
+    setMorningBriefingData({ weather: weatherData, markets: marketsLine, headline: rawHeadline })
 
     for (const line of [greeting, weatherLine, newsLine, marketsLine, motivLine]) {
       addDisplayMessage({ role: 'assistant', content: line, isIntent: true })
     }
-
-    speak([greeting, weatherLine, newsLine, marketsLine, motivLine].join(', '))
+    speak([greeting, weatherLine, newsLine, marketsLine, motivLine].join(' '))
   }, [speak, addDisplayMessage])
 
   const sendToEva = useCallback(async (userText) => {
@@ -602,9 +684,20 @@ export default function App() {
         addDisplayMessage({ role: 'assistant', content: response, isIntent: true })
         speak(response, { newsRate: intent === 'news' })
         if (intent === 'weather') {
-          setShowWeather(true)
-          clearTimeout(weatherTimerRef.current)
-          weatherTimerRef.current = setTimeout(() => setShowWeather(false), 10000)
+          fetchWeatherData().then(d => {
+            if (d) setWeatherVisualData(d)
+            setShowWeatherVisual(true)
+          })
+        } else if (intent === 'stocks') {
+          fetchStocksForVisual().then(s => {
+            if (s) setStockVisualData(s)
+            setShowStockVisual(true)
+          })
+        } else if (intent === 'news') {
+          fetchNewsForVisual().then(articles => {
+            if (articles?.length) setNewsVisualData(articles)
+            setShowNewsVisual(true)
+          })
         }
         return
       }
@@ -1121,9 +1214,37 @@ export default function App() {
         <ConversationLog conversation={conversation} />
       </div>
 
-      <div className={`panel panel-weather ${showWeather ? 'panel-visible' : ''}`}>
-        <WeatherWidget />
-      </div>
+      <WeatherVisual
+        condition={weatherVisualData?.desc}
+        temp={weatherVisualData?.temp}
+        city={weatherVisualData?.city}
+        visible={showWeatherVisual}
+        onDismiss={() => setShowWeatherVisual(false)}
+      />
+
+      <StockVisual
+        stocks={stockVisualData}
+        visible={showStockVisual}
+        onDismiss={() => setShowStockVisual(false)}
+      />
+
+      <NewsVisual
+        articles={newsVisualData}
+        visible={showNewsVisual}
+        onDismiss={() => setShowNewsVisual(false)}
+      />
+
+      <MorningBriefingVisual
+        visible={showMorningBriefing}
+        phase={morningBriefingPhase}
+        data={morningBriefingData}
+        onDismiss={() => {
+          mbTimersRef.current.forEach(clearTimeout)
+          mbTimersRef.current = []
+          setShowMorningBriefing(false)
+          setMorningBriefingPhase(0)
+        }}
+      />
 
       <div className={`panel panel-finance ${showFinance ? 'panel-visible' : ''}`}>
         <div className="panel-finance-header">

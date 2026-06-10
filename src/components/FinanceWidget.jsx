@@ -15,18 +15,39 @@ export default function FinanceWidget() {
   const [editOpen, setEditOpen] = useState(false)
   const [draft, setDraft]       = useState(null)
   const [chartsOpen, setChartsOpen] = useState(false)
+  const [displayNW, setDisplayNW]   = useState(null)
 
   useEffect(() => {
     snapshotNetWorth()
 
     const onUpdate = () => setData(getData())
-    const onExpand = () => setChartsOpen(true)
+
+    let raf
+    const onExpand = () => {
+      setChartsOpen(true)
+      const target = getNetWorth(getData())
+      setDisplayNW(0)
+      const start = performance.now()
+      const duration = 1300
+      function step(now) {
+        const t = Math.min((now - start) / duration, 1)
+        const eased = 1 - Math.pow(1 - t, 3)
+        if (t < 1) {
+          setDisplayNW(Math.round(eased * target))
+          raf = requestAnimationFrame(step)
+        } else {
+          setDisplayNW(null)
+        }
+      }
+      raf = requestAnimationFrame(step)
+    }
 
     window.addEventListener('eva-finance-update', onUpdate)
     window.addEventListener('eva-finance-expand', onExpand)
     return () => {
       window.removeEventListener('eva-finance-update', onUpdate)
       window.removeEventListener('eva-finance-expand', onExpand)
+      cancelAnimationFrame(raf)
     }
   }, [])
 
@@ -72,7 +93,7 @@ export default function FinanceWidget() {
           <div className="finance-stat">
             <span className="finance-stat-label">NET WORTH</span>
             <span className={`finance-stat-value ${nw >= 0 ? 'finance-pos' : 'finance-neg'}`}>
-              {fmtCompact(nw)}
+              {fmtCompact(displayNW != null ? displayNW : nw)}
             </span>
           </div>
 
