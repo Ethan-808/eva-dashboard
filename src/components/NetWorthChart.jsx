@@ -41,23 +41,36 @@ export default function NetWorthChart({ history = [] }) {
   const today = new Date().toISOString().slice(0, 10)
   const displayHistory = history.length > 0 ? history : [{ date: today, amount: 0 }]
 
+  // Destroy only on unmount
+  useEffect(() => {
+    return () => { chartRef.current?.destroy(); chartRef.current = null }
+  }, [])
+
+  // Create or update chart when data/range changes
   useEffect(() => {
     const rangeDays = RANGES.find(r => r.label === range)?.days ?? Infinity
     const data = filterHistory(displayHistory, rangeDays)
+    const labels = data.map(p => p.date)
+    const values = data.map(p => p.amount)
+    const pointRadius = data.length > 30 ? 0 : 3
 
-    if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null }
+    if (chartRef.current) {
+      chartRef.current.data.labels = labels
+      chartRef.current.data.datasets[0].data = values
+      chartRef.current.data.datasets[0].pointRadius = pointRadius
+      chartRef.current.update()
+      return
+    }
+
     if (!canvasRef.current) return
 
     const ctx = canvasRef.current.getContext('2d')
-    const h   = 150  // matches .nw-canvas-wrap fixed height
+    const h   = 150
 
     const grad = ctx.createLinearGradient(0, 0, 0, h)
     grad.addColorStop(0,   'rgba(0,212,255,0.22)')
     grad.addColorStop(0.7, 'rgba(0,212,255,0.04)')
     grad.addColorStop(1,   'rgba(0,212,255,0.00)')
-
-    const labels = data.map(p => p.date)
-    const values = data.map(p => p.amount)
 
     chartRef.current = new Chart(ctx, {
       type: 'line',
@@ -70,7 +83,7 @@ export default function NetWorthChart({ history = [] }) {
           backgroundColor: grad,
           fill: true,
           tension: 0.42,
-          pointRadius: data.length > 30 ? 0 : 3,
+          pointRadius,
           pointBackgroundColor: '#00d4ff',
           pointBorderColor: 'rgba(0,10,30,0.85)',
           pointBorderWidth: 1,
@@ -125,8 +138,6 @@ export default function NetWorthChart({ history = [] }) {
         },
       },
     })
-
-    return () => { if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null } }
   }, [history, range])
 
   return (
