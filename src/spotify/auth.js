@@ -88,7 +88,7 @@ async function doRefresh(refresh_token) {
     }),
   })
 
-  if (!res.ok) { localStorage.removeItem(TOKEN_KEY); return null }
+  if (!res.ok) { clearAuth(); return null }
 
   const data = await res.json()
   const updated = {
