@@ -121,7 +121,7 @@ export default function FinanceWidget() {
         </div>
 
         <div className="finance-charts" style={chartsOpen ? undefined : { display: 'none' }}>
-          <NetWorthChart history={data.netWorthHistory} />
+          <NetWorthChart history={data.netWorthHistory} isVisible={chartsOpen} />
           <div className="finance-charts-bottom">
             <div className="finance-charts-donut-col">
               <span className="finance-stat-label" style={{ marginBottom: 8, display: 'block' }}>ASSET BREAKDOWN</span>

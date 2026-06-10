@@ -32,7 +32,7 @@ function fmtTooltip(v) {
   return `$${v.toFixed(0)}`
 }
 
-export default function NetWorthChart({ history = [] }) {
+export default function NetWorthChart({ history = [], isVisible = true }) {
   const canvasRef = useRef(null)
   const chartRef  = useRef(null)
   const [range, setRange] = useState('ALL')
@@ -40,6 +40,13 @@ export default function NetWorthChart({ history = [] }) {
   // Seed with today + $0 so the chart always has at least one point
   const today = new Date().toISOString().slice(0, 10)
   const displayHistory = history.length > 0 ? history : [{ date: today, amount: 0 }]
+
+  // Resize when panel becomes visible (was initialized with display:none)
+  useEffect(() => {
+    if (isVisible && chartRef.current) {
+      chartRef.current.resize()
+    }
+  }, [isVisible])
 
   // Destroy only on unmount
   useEffect(() => {
