@@ -328,6 +328,7 @@ export default function App() {
   const [morningBriefingData,   setMorningBriefingData]   = useState(null)
   const [morningBriefingPhase,  setMorningBriefingPhase]  = useState(0)
   const mbTimersRef = useRef([])
+  const mbRunIdRef  = useRef(0)
 
   const statusRef = useRef('idle')
   const wakeModeRef = useRef('off')
@@ -530,6 +531,7 @@ export default function App() {
   }, [])
 
   const runMorningBriefing = useCallback(async () => {
+    const runId = ++mbRunIdRef.current
     mbTimersRef.current.forEach(clearTimeout)
     mbTimersRef.current = []
 
@@ -590,6 +592,8 @@ export default function App() {
       : "Weather data unavailable right now."
     const rawHeadline = newsArticles?.[0]?.title || null
     const newsLine = rawHeadline ? `Top story: ${rawHeadline}.` : "No top headlines available right now."
+
+    if (runId !== mbRunIdRef.current) return
 
     setMorningBriefingData({ weather: weatherData, markets: marketsLine, headline: rawHeadline })
 
