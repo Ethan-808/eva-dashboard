@@ -61,8 +61,9 @@ function getSystemPrompt(settings, mode) {
 
 const MODES = ['personal', 'senate', 'startup', 'content']
 
+const isDev = ['127.0.0.1', 'localhost'].includes(window.location.hostname)
 const MODEL = 'claude-sonnet-4-6'
-const API_URL = '/api/claude/v1/messages'
+const API_URL = isDev ? '/api/claude/v1/messages' : '/api/claude'
 const ELEVENLABS_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL'
 const HISTORY_LIMIT = 4
 // Sentence boundary: punctuation followed by whitespace or end of string
@@ -153,7 +154,8 @@ async function fetchWeatherData(location = 'Honolulu') {
   const apiKey = import.meta.env.VITE_OPENWEATHER_API_KEY
   if (apiKey) {
     try {
-      const res = await fetch(`/api/weather/data/2.5/weather?q=${encodeURIComponent(location)}&appid=${apiKey}&units=imperial`)
+      const base = isDev ? '/api/weather' : 'https://api.openweathermap.org'
+      const res = await fetch(`${base}/data/2.5/weather?q=${encodeURIComponent(location)}&appid=${apiKey}&units=imperial`)
       if (res.ok) {
         const d = await res.json()
         return { temp: Math.round(d.main.temp), desc: d.weather[0].description, city: d.name }
@@ -181,8 +183,8 @@ async function fetchStocksForVisual() {
   try {
     const results = await Promise.allSettled(
       syms.map(sym => Promise.all([
-        fetch(`/api/finnhub/api/v1/quote?symbol=${encodeURIComponent(sym)}&token=${apiKey}`).then(r => r.json()),
-        fetch(`/api/finnhub/api/v1/stock/candle?symbol=${encodeURIComponent(sym)}&resolution=5&from=${from}&to=${now}&token=${apiKey}`).then(r => r.json()),
+        fetch(`${isDev ? '/api/finnhub' : 'https://finnhub.io'}/api/v1/quote?symbol=${encodeURIComponent(sym)}&token=${apiKey}`).then(r => r.json()),
+        fetch(`${isDev ? '/api/finnhub' : 'https://finnhub.io'}/api/v1/stock/candle?symbol=${encodeURIComponent(sym)}&resolution=5&from=${from}&to=${now}&token=${apiKey}`).then(r => r.json()),
       ]))
     )
     const stocks = {}
@@ -204,7 +206,7 @@ async function fetchNewsForVisual() {
   const apiKey = import.meta.env.VITE_NEWS_API_KEY
   if (!apiKey) return null
   try {
-    const res = await fetch(`/api/news/v2/top-headlines?country=us&pageSize=5&apiKey=${apiKey}`)
+    const res = await fetch(`${isDev ? '/api/news' : 'https://newsapi.org'}/v2/top-headlines?country=us&pageSize=5&apiKey=${apiKey}`)
     if (!res.ok) return null
     const data = await res.json()
     return data.articles?.slice(0, 5).map(a => ({
@@ -653,8 +655,8 @@ export default function App() {
         if (!apiKey) return "Market data unavailable right now."
         try {
           const [spyRes, btcRes] = await Promise.all([
-            fetch(`/api/finnhub/api/v1/quote?symbol=SPY&token=${apiKey}`),
-            fetch(`/api/finnhub/api/v1/quote?symbol=BINANCE:BTCUSDT&token=${apiKey}`),
+            fetch(`${isDev ? '/api/finnhub' : 'https://finnhub.io'}/api/v1/quote?symbol=SPY&token=${apiKey}`),
+            fetch(`${isDev ? '/api/finnhub' : 'https://finnhub.io'}/api/v1/quote?symbol=BINANCE:BTCUSDT&token=${apiKey}`),
           ])
           const spy = spyRes.ok ? await spyRes.json() : null
           const btc = btcRes.ok ? await btcRes.json() : null

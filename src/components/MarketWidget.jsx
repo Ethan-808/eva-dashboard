@@ -6,13 +6,15 @@ const TICKERS = [
   { symbol: 'BINANCE:BTCUSDT',   label: 'BITCOIN',  short: 'BTC' },
 ]
 
+const isDev = ['127.0.0.1', 'localhost'].includes(window.location.hostname)
+
 async function fetchTickers() {
   const apiKey = import.meta.env.VITE_FINNHUB_API_KEY
   if (!apiKey) return null
 
   const results = await Promise.allSettled(
     TICKERS.map(t =>
-      fetch(`/api/finnhub/api/v1/quote?symbol=${t.symbol}&token=${apiKey}`)
+      fetch(`${isDev ? '/api/finnhub' : 'https://finnhub.io'}/api/v1/quote?symbol=${t.symbol}&token=${apiKey}`)
         .then(r => r.ok ? r.json() : null)
     )
   )

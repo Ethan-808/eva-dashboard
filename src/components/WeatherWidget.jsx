@@ -17,11 +17,14 @@ function getIcon(desc = '') {
   return '◎'
 }
 
+const isDev = ['127.0.0.1', 'localhost'].includes(window.location.hostname)
+
 async function fetchWeather() {
   const apiKey = import.meta.env.VITE_OPENWEATHER_API_KEY
   if (apiKey) {
     try {
-      const res = await fetch(`/api/weather/data/2.5/weather?q=Honolulu&appid=${apiKey}&units=imperial`)
+      const base = isDev ? '/api/weather' : 'https://api.openweathermap.org'
+      const res = await fetch(`${base}/data/2.5/weather?q=Honolulu&appid=${apiKey}&units=imperial`)
       if (res.ok) {
         const d = await res.json()
         return {
