@@ -1,11 +1,11 @@
 import React, { useEffect, useRef } from 'react'
 
-export default function ConversationLog({ conversation }) {
+export default function ConversationLog({ conversation, streamingText }) {
   const bottomRef = useRef(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [conversation])
+  }, [conversation, streamingText])
 
   const recent = conversation.slice(-10)
 
@@ -50,6 +50,18 @@ export default function ConversationLog({ conversation }) {
               )}
             </div>
           ))
+        )}
+        {streamingText && (
+          <div className="conv-entry conv-entry-assistant">
+            <div className="conv-avatar conv-avatar-eva">
+              <OrbIcon />
+            </div>
+            <div className="conv-bubble-wrap">
+              <div className="conv-bubble conv-bubble-streaming">
+                {streamingText}<span className="conv-cursor">▌</span>
+              </div>
+            </div>
+          </div>
         )}
         <div ref={bottomRef} />
       </div>

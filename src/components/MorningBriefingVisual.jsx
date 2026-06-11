@@ -53,12 +53,28 @@ export default function MorningBriefingVisual({ visible, phase, data, onDismiss 
         </div>
 
         <div className={`mb-quadrant${phase >= 4 ? ' mb-q-active' : ''}`}>
-          <div className="mb-q-label">◈ NOW</div>
-          <div className="mb-clock"><LiveClock /></div>
-          <div className="mb-date">{dateStr}</div>
+          {data?.nextEvent ? (
+            <>
+              <div className="mb-q-label">◈ AGENDA</div>
+              <div className="mb-agenda-title">{data.nextEvent.title}</div>
+              {data.nextEvent.time && (
+                <div className="mb-agenda-time">{data.nextEvent.time}</div>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="mb-q-label">◈ NOW</div>
+              <div className="mb-clock"><LiveClock /></div>
+              <div className="mb-date">{dateStr}</div>
+            </>
+          )}
         </div>
 
       </div>
+
+      {phase >= 4 && data?.motiv && (
+        <div className="mb-motiv">{data.motiv}</div>
+      )}
     </div>
   )
 }

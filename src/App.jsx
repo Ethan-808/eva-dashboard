@@ -10,11 +10,15 @@ import ConversationLog from './components/ConversationLog'
 import FinanceWidget from './components/FinanceWidget'
 import {
   classifyIntent, getMaxTokens,
-  handleTime, handleWeather, handleNews, handleCalendar, handleMath, handleGreeting, handleStocks,
+  handleTime, handleWeather, handleNews, handleCalendar, handleMath, handleGreeting, handleStocks, handleWebSearch,
 } from './intent.js'
+import SettingsPanel, { loadSettings } from './components/SettingsPanel'
+import { buildMemorySystemPrompt, getCurrentProject, switchProject, rememberFact, getProjectContext } from './memory/projectMemory'
 import { getCached, setCached } from './cache.js'
 import { initiateLogin, handleCallback, isAuthenticated } from './spotify/auth.js'
 import { initiateCalendarAuth, handleCalendarCallback, isCalendarConnected } from './calendar/auth.js'
+import { initiateGmailAuth, handleGmailCallback, isGmailConnected } from './gmail/auth.js'
+import { summarizeInbox } from './gmail/api.js'
 import { fetchTodayEvents, formatEventTime } from './calendar/api.js'
 import { initPlayer, togglePlay, nextTrack, previousTrack } from './spotify/player.js'
 import { handleMusicCommand } from './spotify/commands.js'
@@ -38,6 +42,22 @@ Personality rules:
 - Vary your sentence structure and vocabulary — never sound robotic or repetitive
 
 Use tools proactively when they help answer accurately.`
+
+const MODE_PROMPTS = {
+  personal: '',
+  senate: '\n\nCurrent mode: SENATE. Use a more formal, policy-oriented tone. Think legislative process, stakeholder impact, professional context. Ethan is interning at the Hawaii state senate.',
+  startup: '\n\nCurrent mode: STARTUP. High energy, execution-focused. Think traction, metrics, fundraising. Ethan is in the Blue Startups accelerator.',
+  content: '\n\nCurrent mode: CONTENT. Focus on The Yang Thesis YouTube channel, personal brand strategy, audience building, content ideas and growth.',
+}
+
+function getSystemPrompt(settings, mode) {
+  let prompt = SYSTEM_PROMPT
+  prompt += MODE_PROMPTS[mode] || ''
+  prompt += buildMemorySystemPrompt()
+  if (settings?.responseLength === 'brief') prompt += '\n\nResponse length: 1 sentence only.'
+  else if (settings?.responseLength === 'detailed') prompt += '\n\nResponse length: up to 5 sentences, include relevant detail.'
+  return prompt
+}
 
 const MODES = ['personal', 'senate', 'startup', 'content']
 
@@ -308,9 +328,13 @@ export default function App() {
   const [spotifyAuth, setSpotifyAuth] = useState(isAuthenticated())
   const [playerState, setPlayerState] = useState(null)
   const [volume, setVolume] = useState(50)
-  const [mode, setMode] = useState('personal')
+  const [mode, setMode] = useState(() => getCurrentProject())
+  const [showSettings, setShowSettings] = useState(false)
+  const [settings, setSettings] = useState(loadSettings)
+  const settingsRef = useRef(loadSettings())
   const [calendarConnected, setCalendarConnected] = useState(isCalendarConnected)
   const [nextEvent, setNextEvent] = useState(null)
+  const [gmailConnected, setGmailConnected] = useState(isGmailConnected)
 
   // Panel visibility
   const [showConvo,   setShowConvo]   = useState(false)
@@ -346,9 +370,19 @@ export default function App() {
   const audioQueueRef = useRef([])
   const isPlayingAudioRef = useRef(false)
   const spokenBoundaryRef = useRef(0)
+  const interruptRecRef = useRef(null)
+  const startInterruptListenerRef = useRef(null)
+  const modeRef = useRef(getCurrentProject())
+  const nextEventRef = useRef(null)
+  const runMorningBriefingRef = useRef(null)
 
   const cycleMode = useCallback(() => {
-    setMode(m => MODES[(MODES.indexOf(m) + 1) % MODES.length])
+    setMode(m => {
+      const next = MODES[(MODES.indexOf(m) + 1) % MODES.length]
+      switchProject(next)
+      modeRef.current = next
+      return next
+    })
   }, [])
 
   const updateStatus = useCallback((s) => { statusRef.current = s; setStatus(s) }, [])
@@ -394,6 +428,7 @@ export default function App() {
   const playNextAudio = useCallback(() => {
     if (audioQueueRef.current.length === 0) {
       isPlayingAudioRef.current = false
+      if (interruptRecRef.current) { interruptRecRef.current.abort(); interruptRecRef.current = null }
       if (statusRef.current === 'speaking') {
         updateStatus('idle')
         clearTimeout(speakingCooldownRef.current)
@@ -414,7 +449,7 @@ export default function App() {
     if (item.isBrowserTTS) {
       const synth = window.speechSynthesis
       const utter = new SpeechSynthesisUtterance(item.text)
-      utter.rate = 0.95
+      utter.rate = (settingsRef.current.voiceSpeed ?? 1.0) * 0.95
       utter.pitch = 0.88
       const applyVoice = () => {
         const voices = synth.getVoices()
@@ -442,6 +477,7 @@ export default function App() {
     isPlayingAudioRef.current = false
     if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
     window.speechSynthesis.cancel()
+    if (interruptRecRef.current) { interruptRecRef.current.abort(); interruptRecRef.current = null }
   }, [])
 
   // Fetch ElevenLabs audio and push to queue; start playing if idle
@@ -452,8 +488,9 @@ export default function App() {
     if (recognitionRef.current) { recognitionRef.current.abort(); recognitionRef.current = null }
     if (passiveRef.current) { passiveRef.current.abort(); passiveRef.current = null }
     updateStatus('speaking')
+    startInterruptListenerRef.current?.()
     const elevenKey = import.meta.env.VITE_ELEVENLABS_API_KEY
-    if (elevenKey) {
+    if (elevenKey && !settingsRef.current.useBrowserTTS) {
       try {
         const res = await fetch(
           `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
@@ -530,6 +567,45 @@ export default function App() {
     } catch {}
   }, [])
 
+  const playInterruptSound = useCallback(() => {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)()
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      osc.type = 'sine'
+      osc.frequency.setValueAtTime(660, ctx.currentTime)
+      osc.frequency.setValueAtTime(440, ctx.currentTime + 0.07)
+      gain.gain.setValueAtTime(0, ctx.currentTime)
+      gain.gain.linearRampToValueAtTime(0.09, ctx.currentTime + 0.01)
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2)
+      osc.start(ctx.currentTime)
+      osc.stop(ctx.currentTime + 0.22)
+    } catch {}
+  }, [])
+
+  const startInterruptListener = useCallback(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SR || interruptRecRef.current) return
+    const rec = new SR()
+    rec.continuous = false
+    rec.interimResults = true
+    rec.lang = 'en-US'
+    rec.onresult = () => {
+      if (statusRef.current !== 'speaking') { rec.abort(); interruptRecRef.current = null; return }
+      rec.abort()
+      interruptRecRef.current = null
+      stopAudio()
+      playInterruptSound()
+      setTimeout(() => startListeningRef.current?.(), 250)
+    }
+    rec.onerror = () => { interruptRecRef.current = null }
+    rec.onend = () => { interruptRecRef.current = null }
+    interruptRecRef.current = rec
+    try { rec.start() } catch { interruptRecRef.current = null }
+  }, [stopAudio, playInterruptSound])
+
   const runMorningBriefing = useCallback(async () => {
     const runId = ++mbRunIdRef.current
     mbTimersRef.current.forEach(clearTimeout)
@@ -548,7 +624,7 @@ export default function App() {
       setTimeout(() => setMorningBriefingPhase(2), 4500),
       setTimeout(() => setMorningBriefingPhase(3), 9000),
       setTimeout(() => setMorningBriefingPhase(4), 13000),
-      setTimeout(() => { setShowMorningBriefing(false); setMorningBriefingPhase(0) }, 21000),
+      setTimeout(() => { setShowMorningBriefing(false); setMorningBriefingPhase(0) }, 28000),
     ]
 
     const [weatherData, newsArticles, marketsLine, motivLine] = await Promise.all([
@@ -580,7 +656,7 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'anthropic-dangerous-direct-browser-access': 'true' },
         body: JSON.stringify({
-          model: MODEL, max_tokens: 50, system: SYSTEM_PROMPT,
+          model: MODEL, max_tokens: 50, system: getSystemPrompt(settingsRef.current, modeRef.current),
           messages: [{ role: 'user', content: "Give Ethan one short motivational line to start his morning. Be direct and specific to his world. No quotes, no attribution. Under 15 words." }],
           stream: false,
         }),
@@ -595,13 +671,33 @@ export default function App() {
 
     if (runId !== mbRunIdRef.current) return
 
-    setMorningBriefingData({ weather: weatherData, markets: marketsLine, headline: rawHeadline })
+    const evt = nextEventRef.current
+    setMorningBriefingData({
+      weather: weatherData,
+      markets: marketsLine,
+      headline: rawHeadline,
+      motiv: motivLine,
+      nextEvent: evt ? { title: evt.title, time: evt.allDay ? null : formatEventTime(evt) } : null,
+    })
 
     for (const line of [greeting, weatherLine, newsLine, marketsLine, motivLine]) {
       addDisplayMessage({ role: 'assistant', content: line, isIntent: true })
     }
     speak([greeting, weatherLine, newsLine, marketsLine, motivLine].join(' '))
   }, [speak, addDisplayMessage])
+
+  const handleSettingsChange = useCallback((key, value, allSettings) => {
+    settingsRef.current = allSettings
+    setSettings(allSettings)
+    if (key === 'wakeWordEnabled') {
+      if (!value) {
+        if (passiveRef.current) { passiveRef.current.abort(); passiveRef.current = null }
+        if (wakeModeRef.current === 'passive') updateWakeMode('off')
+      } else if (wakeModeRef.current === 'off') {
+        startPassiveRef.current?.()
+      }
+    }
+  }, [updateWakeMode])
 
   const sendToEva = useCallback(async (userText) => {
     // Close finance panel
@@ -661,6 +757,122 @@ export default function App() {
       return
     }
 
+    // Settings panel
+    if (/\b(eva\s+settings|open\s+settings|settings\s+panel)\b/i.test(userText)) {
+      addDisplayMessage({ role: 'user', content: userText })
+      setShowSettings(true)
+      const resp = 'Settings open.'
+      addDisplayMessage({ role: 'assistant', content: resp, isIntent: true })
+      speak(resp)
+      return
+    }
+
+    // Project memory commands
+    const switchMatch = userText.match(/\bswitch\s+(?:to\s+)?(?:the\s+)?(\w+)\s+(?:project|mode)\b/i)
+    if (switchMatch) {
+      const name = switchMatch[1].toLowerCase()
+      const success = switchProject(name)
+      addDisplayMessage({ role: 'user', content: userText })
+      if (success) {
+        setMode(name)
+        modeRef.current = name
+        const resp = `Switched to ${name} project.`
+        addDisplayMessage({ role: 'assistant', content: resp, isIntent: true })
+        speak(resp)
+      } else {
+        const resp = `No project called ${name}. Available: personal, senate, startup, content.`
+        addDisplayMessage({ role: 'assistant', content: resp, isIntent: true })
+        speak(resp)
+      }
+      return
+    }
+
+    const rememberMatch = userText.match(/\bremember\s+that\s+(.+)/i)
+    if (rememberMatch) {
+      rememberFact(rememberMatch[1])
+      addDisplayMessage({ role: 'user', content: userText })
+      const resp = 'Got it.'
+      addDisplayMessage({ role: 'assistant', content: resp, isIntent: true })
+      speak(resp)
+      return
+    }
+
+    if (/\bwhat\s+do\s+you\s+know\s+about\s+this\s+project\b/i.test(userText)) {
+      const ctx = getProjectContext()
+      addDisplayMessage({ role: 'user', content: userText })
+      const resp = ctx.keyFacts.length
+        ? `For ${ctx.name}: ${ctx.keyFacts.slice(-5).join('. ')}`
+        : `For the ${ctx.name} project, I only know the basics: ${ctx.context}`
+      addDisplayMessage({ role: 'assistant', content: resp, isIntent: true })
+      speak(resp)
+      return
+    }
+
+    // Gmail voice commands
+    if (/\b(how\s+many|unread|check\s+my)\s+emails?\b|\bemails?\s+(count|waiting)\b/i.test(userText)) {
+      addDisplayMessage({ role: 'user', content: userText })
+      if (!isGmailConnected()) {
+        const resp = 'Gmail isn\'t connected. Say "connect Gmail" or click the Gmail button to link it.'
+        addDisplayMessage({ role: 'assistant', content: resp, isIntent: true })
+        speak(resp)
+      } else {
+        updateStatus('loading')
+        try {
+          const { unreadCount } = await summarizeInbox()
+          const resp = unreadCount === 0
+            ? 'Your inbox is clear — no unread emails.'
+            : `You have ${unreadCount} unread email${unreadCount !== 1 ? 's' : ''}.`
+          addDisplayMessage({ role: 'assistant', content: resp, isIntent: true })
+          speak(resp)
+        } catch {
+          const resp = 'Could not reach Gmail right now.'
+          addDisplayMessage({ role: 'assistant', content: resp, isIntent: true })
+          speak(resp)
+        }
+        updateStatus('idle')
+      }
+      return
+    }
+
+    if (/\b(read|what.{0,15}in)\s+my\s+(inbox|emails?)\b|\blatest\s+emails?\b/i.test(userText)) {
+      addDisplayMessage({ role: 'user', content: userText })
+      if (!isGmailConnected()) {
+        const resp = 'Gmail isn\'t connected yet.'
+        addDisplayMessage({ role: 'assistant', content: resp, isIntent: true })
+        speak(resp)
+      } else {
+        updateStatus('loading')
+        try {
+          const { unreadCount, emails } = await summarizeInbox()
+          if (!emails.length) {
+            const resp = 'Your inbox is empty.'
+            addDisplayMessage({ role: 'assistant', content: resp, isIntent: true })
+            speak(resp)
+          } else {
+            const preview = emails.slice(0, 3).map(e => `${e.from}: ${e.subject}`).join('. ')
+            const resp = `${unreadCount} unread. Latest: ${preview}.`
+            addDisplayMessage({ role: 'assistant', content: resp, isIntent: true })
+            speak(resp)
+          }
+        } catch {
+          const resp = 'Could not fetch emails right now.'
+          addDisplayMessage({ role: 'assistant', content: resp, isIntent: true })
+          speak(resp)
+        }
+        updateStatus('idle')
+      }
+      return
+    }
+
+    if (/\bconnect\s+gmail\b/i.test(userText)) {
+      addDisplayMessage({ role: 'user', content: userText })
+      const resp = 'Opening Gmail authorization.'
+      addDisplayMessage({ role: 'assistant', content: resp, isIntent: true })
+      speak(resp)
+      setTimeout(() => initiateGmailAuth(), 1500)
+      return
+    }
+
     updateStatus('loading')
     setInterimText('')
     setStreamingText('')
@@ -682,6 +894,7 @@ export default function App() {
         else if (intent === 'stocks')  response = await handleStocks(userText)
         else if (intent === 'greeting') response = handleGreeting()
         else if (intent === 'music')   response = await handleMusicCommand(userText, volume, setVolume)
+        else if (intent === 'search')  response = await handleWebSearch(userText)
       } catch {}
       if (response) {
         addDisplayMessage({ role: 'user', content: userText })
@@ -733,7 +946,7 @@ export default function App() {
             'anthropic-dangerous-direct-browser-access': 'true',
           },
           body: JSON.stringify({
-            model: MODEL, max_tokens: maxTokens, system: SYSTEM_PROMPT,
+            model: MODEL, max_tokens: maxTokens, system: getSystemPrompt(settingsRef.current, modeRef.current),
             tools: TOOLS, messages: apiMsgs, stream: true,
           }),
         })
@@ -934,6 +1147,7 @@ export default function App() {
   const startPassiveListening = useCallback(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SR) return
+    if (!settingsRef.current.wakeWordEnabled) return
     if (['listening', 'loading', 'speaking'].includes(statusRef.current)) return
     if (passiveRef.current) { passiveRef.current.abort(); passiveRef.current = null }
 
@@ -982,6 +1196,8 @@ export default function App() {
   startListeningRef.current = startListening
   startPassiveRef.current = startPassiveListening
   startActiveSilenceTimerRef.current = startActiveSilenceTimer
+  startInterruptListenerRef.current = startInterruptListener
+  runMorningBriefingRef.current = runMorningBriefing
 
   // Spacebar hold-to-talk (only after boot completes)
   useEffect(() => {
@@ -1057,6 +1273,8 @@ export default function App() {
   useEffect(() => {
     if (handleCalendarCallback()) {
       setCalendarConnected(true)
+    } else if (handleGmailCallback()) {
+      setGmailConnected(true)
     }
   }, [])
 
@@ -1068,7 +1286,9 @@ export default function App() {
       const now = new Date()
       const upcoming = events.find(e => !e.allDay && new Date(e.start) > now)
         || events.find(e => e.allDay)
-      setNextEvent(upcoming || null)
+      const evt = upcoming || null
+      setNextEvent(evt)
+      nextEventRef.current = evt
     }
     loadEvents()
     const id = setInterval(loadEvents, 5 * 60 * 1000)
@@ -1089,6 +1309,27 @@ export default function App() {
     return () => {
       if (passiveRef.current) { passiveRef.current.abort(); passiveRef.current = null }
     }
+  }, [bootPhase])
+
+  // Auto-schedule morning briefing
+  useEffect(() => {
+    if (bootPhase !== 4) return
+    const briefingKey = 'eva_briefing_last_run'
+    const id = setInterval(() => {
+      const target = settingsRef.current.morningBriefingTime
+      if (!target) return
+      const now = new Date()
+      const hst = now.toLocaleString('en-US', { timeZone: 'Pacific/Honolulu', hour: '2-digit', minute: '2-digit', hour12: false })
+      const [hh, mm] = hst.split(':')
+      const nowHHMM = `${hh.padStart(2, '0')}:${mm}`
+      if (nowHHMM !== target) return
+      const today = now.toLocaleDateString('en-US', { timeZone: 'Pacific/Honolulu' })
+      if (localStorage.getItem(briefingKey) === today) return
+      if (wakeModeRef.current === 'off') return
+      localStorage.setItem(briefingKey, today)
+      runMorningBriefingRef.current?.()
+    }, 60000)
+    return () => clearInterval(id)
   }, [bootPhase])
 
   // Finance panel expand listener
@@ -1174,6 +1415,10 @@ export default function App() {
               </span>
             </div>
 
+            {status === 'loading' && (
+              <div className="orb-thinking" style={{ marginTop: 10 }}>◈ ◈ ◈</div>
+            )}
+
             {activeTools.length > 0 && (
               <div className="active-tools" style={{ marginTop: 10 }}>
                 ◈ {activeTools.map(t => t.replace(/_/g, ' ').toUpperCase()).join(', ')}
@@ -1215,7 +1460,7 @@ export default function App() {
 
       <div className={`panel panel-convo ${showConvo ? 'panel-visible' : ''}`}>
         <button className="panel-close" onClick={() => { setShowConvo(false); clearTimeout(convoTimerRef.current) }}>✕</button>
-        <ConversationLog conversation={conversation} />
+        <ConversationLog conversation={conversation} streamingText={streamingText} />
       </div>
 
       <WeatherVisual
@@ -1286,6 +1531,9 @@ export default function App() {
               {nextEvent.allDay ? nextEvent.title : `${formatEventTime(nextEvent)} ${nextEvent.title}`}
             </span>
           ) : null}
+          {!gmailConnected && (
+            <button className="gcal-connect-btn" onClick={initiateGmailAuth}>◈ GMAIL</button>
+          )}
         </div>
         <div className="sb-center">
           <span className={`sb-status-dot sb-dot-${status}`} />
@@ -1295,10 +1543,22 @@ export default function App() {
           {serviceStatus.map(s => (
             <span key={s.id} className={`sb-service-dot ${s.on ? 'sb-dot-on' : 'sb-dot-off'}`} title={s.id.toUpperCase()} />
           ))}
-          <span className="sb-api-count">{apiCallCount} API</span>
+          {settings.showTokenUsage && <span className="sb-api-count">{apiCallCount} API</span>}
           <SbClock />
+          <button
+            className="sb-gear sb-mode"
+            onClick={() => setShowSettings(s => !s)}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'var(--font)', padding: 0, fontSize: 'inherit', letterSpacing: 'inherit' }}
+          >◈ SET</button>
         </div>
       </div>
+
+      <SettingsPanel
+        visible={showSettings}
+        onClose={() => setShowSettings(false)}
+        apiCallCount={apiCallCount}
+        onSettingsChange={handleSettingsChange}
+      />
     </div>
   )
 }

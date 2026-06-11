@@ -32,6 +32,7 @@ export function classifyIntent(text) {
       /\b(aapl|tsla|nvda|goog|amzn|msft|meta|nflx|spy|qqq|btc|eth)\b/.test(t) ||
       /\b(apple|tesla|nvidia|google|amazon|microsoft|bitcoin|ethereum|crypto)\b/.test(t)) return 'stocks'
   if (/^(hey\s+(eva|there)|hi(\s+eva)?|hello(\s+eva)?|good\s+(morning|afternoon|evening|night))\b/.test(t)) return 'greeting'
+  if (/\b(search(?:\s+for)?|look\s+up)\b/.test(t)) return 'search'
 
   return null
 }
@@ -198,6 +199,37 @@ export async function handleStocks(text) {
 
 export function handleGreeting() {
   return GREETINGS[Math.floor(Math.random() * GREETINGS.length)]
+}
+
+const CLAUDE_API_URL = '/api/claude/v1/messages'
+
+export async function handleWebSearch(text) {
+  const query = text.replace(/^(search(?:\s+for)?|look\s+up)\s+/i, '').trim() || text.trim()
+  try {
+    const res = await fetch(CLAUDE_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 300,
+        system: 'You are EVA, a voice assistant. Answer in one paragraph max. Be direct and concise for voice output — no markdown, no lists, no special characters.',
+        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+        messages: [{ role: 'user', content: query }],
+      }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err?.error?.message || `HTTP ${res.status}`)
+    }
+    const data = await res.json()
+    const answer = data.content?.filter(b => b.type === 'text').map(b => b.text).join(' ').trim()
+    return answer || "I couldn't find anything on that right now."
+  } catch (err) {
+    return `Search failed: ${err.message}`
+  }
 }
 
 // Returns just the top headline title — used by morning briefing
