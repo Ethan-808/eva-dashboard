@@ -592,8 +592,26 @@ export default function App() {
     rec.continuous = false
     rec.interimResults = true
     rec.lang = 'en-US'
-    rec.onresult = () => {
+    rec.onresult = (e) => {
       if (statusRef.current !== 'speaking') { rec.abort(); interruptRecRef.current = null; return }
+
+      const COMMON_WORDS = new Set([
+        'the','i','hey','eva','stop','pause','wait','can','you','what',
+        'how','when','where','who','is','are','do','did','will','would',
+        'could','should','please','no','yes','ok','okay','go','that',
+        'this','and','but','or','tell','show','my','me','let','now'
+      ])
+
+      const result = e.results[e.resultIndex][0]
+      const transcript = result.transcript.trim().toLowerCase()
+      const confidence = result.confidence
+      const words = transcript.split(/\s+/).filter(Boolean)
+      const hasRealWord = words.some(w => COMMON_WORDS.has(w.replace(/[^a-z]/g, '')))
+
+      if (confidence < 0.85) return
+      if (words.length < 3) return
+      if (!hasRealWord) return
+
       rec.abort()
       interruptRecRef.current = null
       stopAudio()
