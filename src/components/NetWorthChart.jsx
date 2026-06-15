@@ -41,20 +41,15 @@ export default function NetWorthChart({ history = [], isVisible = true }) {
   const today = new Date().toISOString().slice(0, 10)
   const displayHistory = history.length > 0 ? history : [{ date: today, amount: 0 }]
 
-  // Resize when panel becomes visible (was initialized with display:none)
-  useEffect(() => {
-    if (isVisible && chartRef.current) {
-      chartRef.current.resize()
-    }
-  }, [isVisible])
-
   // Destroy only on unmount
   useEffect(() => {
     return () => { chartRef.current?.destroy(); chartRef.current = null }
   }, [])
 
-  // Create or update chart when data/range changes
+  // Create or update chart when data/range/visibility changes
   useEffect(() => {
+    if (!isVisible) return
+
     const rangeDays = RANGES.find(r => r.label === range)?.days ?? Infinity
     const data = filterHistory(displayHistory, rangeDays)
     const labels = data.map(p => p.date)
@@ -66,6 +61,7 @@ export default function NetWorthChart({ history = [], isVisible = true }) {
       chartRef.current.data.datasets[0].data = values
       chartRef.current.data.datasets[0].pointRadius = pointRadius
       chartRef.current.update()
+      requestAnimationFrame(() => chartRef.current?.resize())
       return
     }
 
@@ -145,7 +141,7 @@ export default function NetWorthChart({ history = [], isVisible = true }) {
         },
       },
     })
-  }, [history, range])
+  }, [history, range, isVisible])
 
   return (
     <div className="nw-chart-wrap">

@@ -7,6 +7,7 @@ import NewsVisual from './components/NewsVisual'
 import MorningBriefingVisual from './components/MorningBriefingVisual'
 import NowPlaying from './components/NowPlaying'
 import ConversationLog from './components/ConversationLog'
+import OutputPanel from './components/OutputPanel'
 import FinanceWidget from './components/FinanceWidget'
 import {
   classifyIntent, getMaxTokens,
@@ -47,7 +48,8 @@ const MODE_PROMPTS = {
   personal: '',
   senate: '\n\nCurrent mode: SENATE. Use a more formal, policy-oriented tone. Think legislative process, stakeholder impact, professional context. Ethan is interning at the Hawaii state senate.',
   startup: '\n\nCurrent mode: STARTUP. High energy, execution-focused. Think traction, metrics, fundraising. Ethan is in the Blue Startups accelerator.',
-  content: '\n\nCurrent mode: CONTENT. Focus on The Yang Thesis YouTube channel, personal brand strategy, audience building, content ideas and growth.',
+  content: '\n\nCurrent mode: CONTENT. Focus on The Yang Thesis YouTube channel, personal brand strategy, audience building, content ideas and growth. When generating video concepts or title ideas, format output as structured markdown: ## Title Options (numbered list of 5), ## Thumbnail Concepts (3 visual directions with color/style direction), ## Hook Line, ## Target Keywords.',
+  research: '\n\nCurrent mode: RESEARCH. Conduct thorough, in-depth analysis. Structure ALL responses in markdown: ## Summary (2-3 sentences), ## Key Findings (bulleted), ## Implications (bulleted), ## Follow-up Questions (numbered). Be comprehensive — detailed, well-organized responses are expected and welcomed here.',
 }
 
 function getSystemPrompt(settings, mode) {
@@ -59,7 +61,13 @@ function getSystemPrompt(settings, mode) {
   return prompt
 }
 
-const MODES = ['personal', 'senate', 'startup', 'content']
+const MODES = ['personal', 'senate', 'startup', 'content', 'research']
+
+function isRichContent(text) {
+  if (text.length > 300) return true
+  if (/^##?\s|\n##?\s|^[-*]\s{1,3}\S|\n[-*]\s{1,3}\S|```/.test(text)) return true
+  return false
+}
 
 const isDev = ['127.0.0.1', 'localhost'].includes(window.location.hostname)
 const MODEL = 'claude-sonnet-4-6'
@@ -341,6 +349,8 @@ export default function App() {
   // Panel visibility
   const [showConvo,   setShowConvo]   = useState(false)
   const [showFinance, setShowFinance] = useState(false)
+  const [showOutput,  setShowOutput]  = useState(false)
+  const [outputContent, setOutputContent] = useState('')
   const convoTimerRef = useRef(null)
 
   // Visual panels
@@ -729,6 +739,15 @@ export default function App() {
       return
     }
 
+    // Close output panel
+    if (/\b(close|hide|dismiss|collapse).*(output|research|panel|result)\b/i.test(userText)) {
+      setShowOutput(false)
+      addDisplayMessage({ role: 'user', content: userText })
+      addDisplayMessage({ role: 'assistant', content: 'Output panel closed.', isIntent: true })
+      speak('Done.')
+      return
+    }
+
     // Sleep / deactivate command
     if (wakeModeRef.current === 'active' && /\b(go to sleep|goodbye eva|sleep mode|bye eva|stop listening)\b/i.test(userText)) {
       addDisplayMessage({ role: 'user', content: userText })
@@ -800,7 +819,7 @@ export default function App() {
         addDisplayMessage({ role: 'assistant', content: resp, isIntent: true })
         speak(resp)
       } else {
-        const resp = `No project called ${name}. Available: personal, senate, startup, content.`
+        const resp = `No project called ${name}. Available: personal, senate, startup, content, research.`
         addDisplayMessage({ role: 'assistant', content: resp, isIntent: true })
         speak(resp)
       }
@@ -955,7 +974,9 @@ export default function App() {
     try {
       let history = apiHistoryRef.current.slice(-HISTORY_LIMIT)
       while (history.length && history[0].role !== 'user') history = history.slice(1)
-      const maxTokens = getMaxTokens(userText)
+      const isResearch = modeRef.current === 'research'
+      const isContentTask = modeRef.current === 'content' && /\b(video|title|thumbnail|script|ideas?|concepts?|channel|strategy)\b/i.test(userText)
+      const maxTokens = isResearch ? 1200 : (isContentTask ? 800 : getMaxTokens(userText))
       let apiMsgs = history.map(m => ({ role: m.role, content: m.content }))
 
       while (true) {
@@ -1072,6 +1093,10 @@ export default function App() {
         setCached(userText, finalText)
         addMessage({ role: 'assistant', content: finalText })
         trySpeakNext(finalText, true)
+        if (isResearch || isContentTask || isRichContent(finalText)) {
+          setOutputContent(finalText)
+          setShowOutput(true)
+        }
         break
       }
     } catch (err) {
@@ -1405,6 +1430,22 @@ export default function App() {
   return (
     <div className="app-shell">
       <StarField />
+      <div className="scanlines" aria-hidden="true" />
+
+      {/* HUD corner brackets */}
+      <div className={`hud-corner hud-tl ${bootPhase >= 4 ? 'hud-visible' : ''}`} aria-hidden="true" />
+      <div className={`hud-corner hud-tr ${bootPhase >= 4 ? 'hud-visible' : ''}`} aria-hidden="true" />
+      <div className={`hud-corner hud-bl ${bootPhase >= 4 ? 'hud-visible' : ''}`} aria-hidden="true" />
+      <div className={`hud-corner hud-br ${bootPhase >= 4 ? 'hud-visible' : ''}`} aria-hidden="true" />
+
+      {/* Orb HUD rings */}
+      {bootPhase >= 1 && (
+        <div className="orb-hud-rings" aria-hidden="true">
+          <div className="orb-hud-ring" />
+          <div className="orb-hud-ring" />
+          <div className="orb-hud-ring" />
+        </div>
+      )}
 
       {/* ── Orb stage: centered, always visible ── */}
       <div className="orb-stage">
@@ -1513,6 +1554,12 @@ export default function App() {
           setShowMorningBriefing(false)
           setMorningBriefingPhase(0)
         }}
+      />
+
+      <OutputPanel
+        content={outputContent}
+        visible={showOutput}
+        onDismiss={() => setShowOutput(false)}
       />
 
       <div className={`panel panel-finance ${showFinance ? 'panel-visible' : ''}`}>

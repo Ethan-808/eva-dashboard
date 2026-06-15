@@ -25,6 +25,12 @@ const DEFAULT_PROJECTS = {
     keyFacts: [],
     lastActive: null,
   },
+  research: {
+    context: 'Deep research mode. Multi-source investigation, structured analysis, comprehensive reports.',
+    notes: [],
+    keyFacts: [],
+    lastActive: null,
+  },
 }
 
 function getMemory() {
